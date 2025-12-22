@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
+COPY Cargo.toml ./
+
 # 2. 创建一个空的 main.rs 来预编译依赖
 # 这样如果你只改了代码没改依赖，下一次 build 就不需要重新下载编译 crates
 RUN mkdir src && \

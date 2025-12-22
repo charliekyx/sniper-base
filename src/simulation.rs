@@ -5,7 +5,7 @@ use ethers::prelude::{BaseContract, Provider, Ws};
 use ethers::providers::Middleware;
 use ethers::types::{Address, Transaction, U256};
 use revm::{
-    db::{CacheDB, EmptyDB},
+    db::{CacheDB, EthersDB},
     primitives::{
         AccountInfo, Address as rAddress, ExecutionResult, Output, TransactTo, U256 as rU256,
     },
@@ -32,22 +32,11 @@ impl Simulator {
     ) -> Result<(bool, U256, String)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
 
-        // Use EmptyDB as base, we'll fetch state on-demand
-        let mut cache_db = CacheDB::new(EmptyDB::default());
-
-        // Setup simulation wallet
-        let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        let initial_eth = rU256::from(10000000000000000000u128); // 10 ETH
-
-        cache_db.insert_account_info(
-            my_wallet,
-            AccountInfo {
-                balance: initial_eth,
-                nonce: 0,
-                code_hash: revm::primitives::KECCAK_EMPTY,
-                code: None,
-            },
-        );
+        // 1. Initialize EthersDB to fetch state (code + storage) on demand
+        // self.provider is already an Arc<Provider<Ws>>, so we pass it directly.
+        let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
+            .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
+        let mut cache_db = CacheDB::new(ethers_db);
 
         // Prepare ABIs
         let router_abi = parse_abi(&[
@@ -65,49 +54,17 @@ impl Simulator {
         let revm_router = rAddress::from(router_addr.0);
         let revm_token = rAddress::from(token_out.0);
 
-        // Fetch router contract code
-        let router_code = self
-            .provider
-            .get_code(router_addr, Some(block_number.into()))
-            .await?;
-        cache_db.insert_account_info(
-            revm_router,
-            AccountInfo {
-                balance: rU256::ZERO,
-                nonce: 1,
-                code_hash: revm::primitives::keccak256(&router_code),
-                code: Some(revm::primitives::Bytecode::new_raw(router_code.0.into())),
-            },
-        );
+        // 2. Setup simulation wallet (Mocking our own state)
+        let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
+        let initial_eth = rU256::from(10000000000000000000u128); // 10 ETH
 
-        // Fetch token contract code
-        let token_code = self
-            .provider
-            .get_code(token_out, Some(block_number.into()))
-            .await?;
         cache_db.insert_account_info(
-            revm_token,
+            my_wallet,
             AccountInfo {
-                balance: rU256::ZERO,
-                nonce: 1,
-                code_hash: revm::primitives::keccak256(&token_code),
-                code: Some(revm::primitives::Bytecode::new_raw(token_code.0.into())),
-            },
-        );
-
-        // Fetch WETH contract code
-        let weth_addr = rAddress::from(WETH_BASE.0);
-        let weth_code = self
-            .provider
-            .get_code(*WETH_BASE, Some(block_number.into()))
-            .await?;
-        cache_db.insert_account_info(
-            weth_addr,
-            AccountInfo {
-                balance: rU256::ZERO,
-                nonce: 1,
-                code_hash: revm::primitives::keccak256(&weth_code),
-                code: Some(revm::primitives::Bytecode::new_raw(weth_code.0.into())),
+                balance: initial_eth,
+                nonce: 0,
+                code_hash: revm::primitives::KECCAK_EMPTY,
+                code: None,
             },
         );
 
@@ -237,10 +194,9 @@ impl Simulator {
         }
 
         // Step 5: Calculate final result
-        let final_eth = evm
-            .db
-            .as_mut()
-            .unwrap()
+        // 直接从 cache_db 获取，因为 evm.db 只是它的一个可变引用
+        // 注意：在 transact_commit 之后，状态已经写入了 cache_db
+        let final_eth = cache_db
             .basic(my_wallet)
             .map_err(|_| anyhow::anyhow!("Failed to get balance"))?
             .unwrap()

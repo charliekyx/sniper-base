@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # 核心库
-ethers = { version = "2.0", features = ["ws", "ipc", "rustls", "abigen"] }
+ethers = { version = "2.0.14", features = ["ws", "rustls", "abigen"] }
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -15,4 +15,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = "0.4"
 lazy_static = "1.4"
 # 必须锁定 revm 版本以兼容 ethers
-revm = { version = "3.5.0", default-features = false, features = ["std", "ethersdb"] }
+revm = { version = "3.5.0", features = ["ethersdb"] }

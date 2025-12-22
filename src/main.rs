@@ -13,46 +13,121 @@ use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::task;
 use tokio::time::{sleep, Duration};
+use std::io::{self, Write}; // 引入 IO 库用于刷新打印缓存
 
 use crate::constants::{ BASESWAP_ROUTER, ALIENBASE_ROUTER, UNIV3_ROUTER};
 
 // --- 辅助函数：Input Data 解码 ---
+// --- 辅助函数：Input Data 解码 (增强版) ---
 fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
-    if input.len() < 4 {
-        return None;
-    }
-    let swap_sig = &input[0..4] == [0x7f, 0xf3, 0x6a, 0xb5];
-    let add_liq_sig = &input[0..4] == [0xf3, 0x05, 0xd7, 0x19];
+    if input.len() < 4 { return None; }
+    let sig = &input[0..4];
 
-    if swap_sig {
-        let abi_str = r#"[{"name":"swapExactETHForTokens","type":"function","inputs":[{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
+    // 1. [BUY] swapExactETHForTokens (标准买入)
+    // Sig: 0x7ff36ab5
+    if sig == [0x7f, 0xf3, 0x6a, 0xb5] {
+        let abi_str = r#"[{"name":"x","type":"function","inputs":[{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
         if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
-            if let Ok(func) = abi.function("swapExactETHForTokens") {
+            if let Ok(func) = abi.function("x") {
                 if let Ok(decoded) = func.decode_input(&input[4..]) {
+                    // path 是第 2 个参数 (index 1)
                     if let Some(path) = decoded[1].clone().into_array() {
-                        if let Some(last) = path.last() {
-                            return last.clone().into_address().map(|t| ("Swap".to_string(), t));
+                        if let Some(last) = path.last() { // 最后一个是买到的币
+                            return last.clone().into_address().map(|t| ("Buy_ETH->Token".to_string(), t));
                         }
                     }
                 }
             }
         }
-    } else if add_liq_sig {
-        let abi_str = r#"[{"name":"addLiquidityETH","type":"function","inputs":[{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"address"},{"type":"uint256"}]}]"#;
+    }
+    
+    // 2. [BUY] swapExactETHForTokensSupportingFeeOnTransferTokens (带税买入 - 土狗常用)
+    // Sig: 0xb6f9de95
+    else if sig == [0xb6, 0xf9, 0xde, 0x95] {
+        let abi_str = r#"[{"name":"x","type":"function","inputs":[{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
         if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
-            if let Ok(func) = abi.function("addLiquidityETH") {
+            if let Ok(func) = abi.function("x") {
                 if let Ok(decoded) = func.decode_input(&input[4..]) {
-                    return decoded[0]
-                        .clone()
-                        .into_address()
-                        .map(|t| ("AddLiquidity".to_string(), t));
+                    if let Some(path) = decoded[1].clone().into_array() {
+                        if let Some(last) = path.last() {
+                            return last.clone().into_address().map(|t| ("Buy_Fee_ETH->Token".to_string(), t));
+                        }
+                    }
                 }
             }
         }
     }
+
+    // 3. [SELL] swapExactTokensForETH (标准卖出)
+    // Sig: 0x18cbafe5
+    else if sig == [0x18, 0xcb, 0xaf, 0xe5] {
+        let abi_str = r#"[{"name":"x","type":"function","inputs":[{"type":"uint256"},{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
+        if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
+            if let Ok(func) = abi.function("x") {
+                if let Ok(decoded) = func.decode_input(&input[4..]) {
+                    // path 是第 3 个参数 (index 2)
+                    if let Some(path) = decoded[2].clone().into_array() {
+                        if let Some(first) = path.first() { // 第一个是卖出的币
+                            return first.clone().into_address().map(|t| ("Sell_Token->ETH".to_string(), t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 4. [SELL] swapExactTokensForETHSupportingFeeOnTransferTokens (带税卖出)
+    // Sig: 0x791ac947
+    else if sig == [0x79, 0x1a, 0xc9, 0x47] {
+        let abi_str = r#"[{"name":"x","type":"function","inputs":[{"type":"uint256"},{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
+        if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
+            if let Ok(func) = abi.function("x") {
+                if let Ok(decoded) = func.decode_input(&input[4..]) {
+                    if let Some(path) = decoded[2].clone().into_array() {
+                        if let Some(first) = path.first() {
+                            return first.clone().into_address().map(|t| ("Sell_Fee_Token->ETH".to_string(), t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. [SWAP] swapExactTokensForTokens (币币互换 / USDC买币)
+    // Sig: 0x38ed1739
+    else if sig == [0x38, 0xed, 0x17, 0x39] {
+        let abi_str = r#"[{"name":"x","type":"function","inputs":[{"type":"uint256"},{"type":"uint256"},{"type":"address[]"},{"type":"address"},{"type":"uint256"}]}]"#;
+        if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
+            if let Ok(func) = abi.function("x") {
+                if let Ok(decoded) = func.decode_input(&input[4..]) {
+                    if let Some(path) = decoded[2].clone().into_array() {
+                        // 如果 path 最后一个是 WETH，那就是卖币换WETH
+                        // 如果 path 第一个是 WETH，那就是用WETH买币
+                        // 这里我们简单起见，统一把“买到的目标”作为识别对象
+                        if let Some(last) = path.last() {
+                             return last.clone().into_address().map(|t| ("Swap_Token->Token".to_string(), t));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. [LIQ] addLiquidityETH (加池子)
+    // Sig: 0xf305d719
+    else if sig == [0xf3, 0x05, 0xd7, 0x19] {
+        let abi_str = r#"[{"name":"addLiquidityETH","type":"function","inputs":[{"type":"address"},{"type":"uint256"},{"type":"uint256"},{"type":"uint256"},{"type":"address"},{"type":"uint256"}]}]"#;
+        if let Ok(abi) = serde_json::from_str::<Abi>(abi_str) {
+            if let Ok(func) = abi.function("addLiquidityETH") {
+                if let Ok(decoded) = func.decode_input(&input[4..]) {
+                    return decoded[0].clone().into_address().map(|t| ("AddLiquidity".to_string(), t));
+                }
+            }
+        }
+    }
+
     None
 }
-
 // --- 交易执行模块 ---
 
 // 1. 买入
@@ -263,80 +338,69 @@ async fn monitor_position(
     }
 }
 
-// ==============================================================================
-// 修复版 SHADOW MODE
-// 策略：只监听 Router + 强制串行 + 采样 (防止 429 爆速率)
-// ==============================================================================
 async fn run_shadow_mode(config: AppConfig) -> anyhow::Result<()> {
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let provider = Arc::new(provider);
 
-    println!(">>> SHADOW MODE STARTED (SAFE MODE) <<<");
+    println!(">>> SHADOW MODE STARTED (BALANCED) <<<");
     println!(">>> Source: Public Node (Log Subscription)");
-    println!(">>> Strategy: Monitoring Routers (BaseSwap/AlienBase/UniV3) directly");
-    
-    // 1. 缩小监听范围：只听 Router，不再听 WETH
-    // 这样可以直接过滤掉 90% 无关的 WETH 转账噪音
-    let filter = Filter::new().address(vec![
-        *BASESWAP_ROUTER,
-        *ALIENBASE_ROUTER,
-        *UNIV3_ROUTER,
-    ]);
+    println!(">>> Filter: WETH Events (High Volume)");
+    println!(">>> Rate Limit: Processing only 1 out of 50 logs to save API credits");
+
+    // 1. 切回监听 WETH，这是 Base 链上最活跃的合约，保证有源源不断的数据
+    let filter = Filter::new().address(vec![*WETH_BASE]);
     
     let mut stream = provider.subscribe_logs(&filter).await?;
     let mut counter = 0;
 
+    println!(">>> Waiting for logs... (Dots indicate activity)");
+
     while let Some(log) = stream.next().await {
-        // 2. 简单的采样节流 (Sampling)
-        // 免费节点扛不住所有交易。我们每收到 5 条日志，只处理其中 1 条。
-        // Shadow Mode 的目的是测试逻辑，不是全量分析，这样足够了。
         counter += 1;
-        if counter % 5 != 0 {
+
+        // 2. 视觉心跳：每收到 10 条日志打印一个点，证明连接是活的
+        if counter % 10 == 0 {
+            print!(".");
+            io::stdout().flush().unwrap(); // 强制刷新缓存，立刻显示
+        }
+
+        // 3. 强力采样：每 50 条日志只处理 1 条
+        // WETH 的日志量极大，不采样会瞬间耗尽免费节点的 CU 额度 (429 Error)
+        if counter % 10 != 0 {
             continue; 
         }
 
         if let Some(tx_hash) = log.transaction_hash {
-            // 3. 去掉 task::spawn，改为串行处理 (Sequential Processing)
-            // 原来的并发请求会导致瞬间 QPS 爆炸。
-            // 改为串行：必须等这一单处理完，才去拿下一单的 Log。
-            // 这天然地形成了一个“限流阀”，速度取决于你的网络 RTT，通常不会爆 429。
-            
-            print!("."); // 打印心跳，证明还在活着
-            use std::io::{self, Write};
-            io::stdout().flush().unwrap();
-
-            // 主动休眠 100ms，给节点喘息时间
+            // 4. 串行处理：处理时稍微停顿一下，温柔对待公共节点
             sleep(Duration::from_millis(100)).await;
 
             if let Ok(Some(tx)) = provider.get_transaction(tx_hash).await {
-                // 复用解码逻辑
+                // 复用解码逻辑测试
                 if let Some((action, token_addr)) = decode_router_input(&tx.input) {
                     
                     let to = tx.to.unwrap_or_default();
                     let router_name = get_router_name(&to);
                     
-                    if router_name == "Unknown" { continue; }
+                    // 只记录我们关心的 Router 交易
+                    if router_name != "Unknown" {
+                        println!("\n[Shadow Capture] {} on {} | Token: {:?}", action, router_name, token_addr);
 
-                    println!("\n[Shadow Capture] {} on {} | Token: {:?}", action, router_name, token_addr);
+                        let record = ShadowRecord {
+                            timestamp: Local::now().to_rfc3339(),
+                            event_type: action.clone(),
+                            router: router_name,
+                            trigger_hash: format!("{:?}", tx.hash),
+                            token_address: format!("{:?}", token_addr),
+                            amount_in_eth: config.buy_amount_eth.to_string(),
+                            simulation_result: "Shadow_Captured".to_string(),
+                            profit_eth_after_sell: None,
+                            gas_used: 0,
+                            copy_target: None,
+                        };
 
-                    let record = ShadowRecord {
-                        timestamp: Local::now().to_rfc3339(),
-                        event_type: action.clone(),
-                        router: router_name,
-                        trigger_hash: format!("{:?}", tx.hash),
-                        token_address: format!("{:?}", token_addr),
-                        amount_in_eth: config.buy_amount_eth.to_string(),
-                        simulation_result: "Shadow_Captured".to_string(),
-                        profit_eth_after_sell: None,
-                        gas_used: 0,
-                        copy_target: None,
-                    };
-
-                    log_shadow_trade(record);
+                        log_shadow_trade(record);
+                    }
                 }
-            } else {
-                // 如果还报错 429，这里会捕捉到
-                // println!("(Skipped due to API error)");
             }
         }
     }

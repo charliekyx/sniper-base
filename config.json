@@ -1,15 +1,10 @@
 {
-  "rpc_url": "wss://base-mainnet.public.blastapi.io",
-  "private_key": "",
+  "rpc_url": "wss://base-mainnet.g.alchemy.com/v2/Dy8qDdgHXfCqzP-o1Bw2X",
   "sniper_enabled": true,
-  "copy_trade_enabled": false,
+  "copy_trade_enabled": true,
   "shadow_mode": true,
-  "target_wallets": [],
-  "buy_amount_eth": 0.005,
-  "gas_limit": 500000,
-  "max_priority_fee_gwei": 5,
-  "sniper_block_delay": 1,
-  "sell_strategy_2x_exit_half": true,
-  "sell_strategy_3x_exit_all": true,
-  "anti_rug_dip_threshold": 50
+  "target_wallets": [
+    "0x0000000000000000000000000000000000000000"
+  ],
+  "max_gas_gwei": 50
 }

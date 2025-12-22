@@ -224,9 +224,15 @@ async fn main() -> anyhow::Result<()> {
     
     // 初始化钱包
     let wallet = if !config.private_key.is_empty() {
-        config.private_key.parse::<LocalWallet>()?.with_chain_id(chain_id)
+        config.private_key.parse::<LocalWallet>()?.with_chain_id(chain_id) // 这是为了防止重放攻击（Replay Attack), 以太坊交易签名标准（EIP-155）要求签名中包含链 ID，这样在 Base 链上签名的交易就不能被恶意拿到以太坊主网或其他链上去广播执行
     } else {
-        LocalWallet::new(&mut rand::thread_rng())
+        if !config.shadow_mode {
+            // 实盘模式下必须提供私钥，否则直接崩溃以保护资金
+            panic!("[FATAL] You are in LIVE mode but no 'private_key' is set! A random wallet would cause PERMANENT LOSS of funds. Please configure it.");
+        }
+        let w = LocalWallet::new(&mut rand::thread_rng()).with_chain_id(chain_id);
+        println!("[Shadow] No private key found. Using temporary random wallet: {:?}", w.address());
+        w
     };
     
     let client = Arc::new(SignerMiddleware::new(provider.clone(), wallet.clone()));

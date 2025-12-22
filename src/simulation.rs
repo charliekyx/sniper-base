@@ -5,17 +5,53 @@ use ethers::prelude::{BaseContract, Provider, Ws};
 use ethers::providers::Middleware;
 use ethers::types::{Address, Transaction, U256};
 use revm::{
-    db::{CacheDB, EthersDB},
+    db::{CacheDB, DatabaseRef, EthersDB},
     primitives::{
-        AccountInfo, Address as rAddress, ExecutionResult, Output, TransactTo, U256 as rU256,
+        AccountInfo, Address as rAddress, Bytecode, ExecutionResult, Output, TransactTo,
+        B256 as rB256, U256 as rU256,
     },
     Database, EVM,
 };
+use std::cell::RefCell;
 use std::str::FromStr;
 use std::sync::Arc;
 
 pub struct Simulator {
     provider: Arc<Provider<Ws>>,
+}
+
+// Wrapper to make EthersDB (which is &mut) compatible with CacheDB (which needs DatabaseRef/&self)
+pub struct ForkDB {
+    backend: RefCell<EthersDB<Provider<Ws>>>,
+}
+
+impl ForkDB {
+    pub fn new(backend: EthersDB<Provider<Ws>>) -> Self {
+        Self {
+            backend: RefCell::new(backend),
+        }
+    }
+}
+
+impl DatabaseRef for ForkDB {
+    type Error = <EthersDB<Provider<Ws>> as Database>::Error;
+
+    fn basic(&self, address: rAddress) -> Result<Option<AccountInfo>, Self::Error> {
+        self.backend.borrow_mut().basic(address)
+    }
+
+    fn code_by_hash(&self, code_hash: rB256) -> Result<Bytecode, Self::Error> {
+        self.backend.borrow_mut().code_by_hash(code_hash)
+    }
+
+    fn storage(&self, address: rAddress, index: rU256) -> Result<rU256, Self::Error> {
+        self.backend.borrow_mut().storage(address, index)
+    }
+
+    fn block_hash(&self, number: rU256) -> Result<rB256, Self::Error> {
+        // Pass U256 directly as required by the Database trait in this version of revm
+        self.backend.borrow_mut().block_hash(number)
+    }
 }
 
 impl Simulator {
@@ -32,11 +68,13 @@ impl Simulator {
     ) -> Result<(bool, U256, String)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
 
-        // 1. Initialize EthersDB to fetch state (code + storage) on demand
-        // self.provider is already an Arc<Provider<Ws>>, so we pass it directly.
+        // 1. Initialize EthersDB
         let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
             .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
-        let mut cache_db = CacheDB::new(ethers_db);
+
+        // 2. Wrap in ForkDB and then CacheDB
+        let fork_db = ForkDB::new(ethers_db);
+        let mut cache_db = CacheDB::new(fork_db);
 
         // Prepare ABIs
         let router_abi = parse_abi(&[
@@ -54,7 +92,7 @@ impl Simulator {
         let revm_router = rAddress::from(router_addr.0);
         let revm_token = rAddress::from(token_out.0);
 
-        // 2. Setup simulation wallet (Mocking our own state)
+        // 3. Setup simulation wallet
         let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
         let initial_eth = rU256::from(10000000000000000000u128); // 10 ETH
 
@@ -68,7 +106,7 @@ impl Simulator {
             },
         );
 
-        // Create EVM instance with the database after all initial setup is done
+        // Create EVM instance
         let mut evm = EVM {
             env: Default::default(),
             db: Some(&mut cache_db),
@@ -78,7 +116,7 @@ impl Simulator {
         evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(block_number + 1);
 
-        // Step 0: Get expected token amount (for buy tax calculation)
+        // Step 0: Get expected token amount
         let path = vec![*WETH_BASE, token_out];
         let amounts_out_calldata = router.encode("getAmountsOut", (amount_in_eth, path.clone()))?;
 
@@ -150,7 +188,7 @@ impl Simulator {
             ));
         }
 
-        // Tax check: if received < 80% of expected, it's high tax
+        // Tax check
         if token_balance * 10 < expected_tokens * 8 {
             return Ok((
                 false,
@@ -194,8 +232,8 @@ impl Simulator {
         }
 
         // Step 5: Calculate final result
-        // 直接从 cache_db 获取，因为 evm.db 只是它的一个可变引用
-        // 注意：在 transact_commit 之后，状态已经写入了 cache_db
+        // Directly get from cache_db because evm.db is just a mutable reference to it
+        // Note: After transact_commit, the state is already written to cache_db
         let final_eth = cache_db
             .basic(my_wallet)
             .map_err(|_| anyhow::anyhow!("Failed to get balance"))?

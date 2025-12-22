@@ -195,6 +195,8 @@ dependencies = [
  "anyhow",
  "chrono",
  "ethers",
+ "ethers-core",
+ "ethers-providers",
  "lazy_static",
  "revm",
  "serde",
@@ -1152,6 +1154,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+ "winapi",
  "ws_stream_wasm",
 ]
 

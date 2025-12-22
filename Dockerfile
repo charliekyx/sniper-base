@@ -9,9 +9,6 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 1. 为了利用 Docker 缓存，我们先复制依赖定义文件
-COPY Cargo.toml Cargo.lock ./
-
 # 2. 创建一个空的 main.rs 来预编译依赖
 # 这样如果你只改了代码没改依赖，下一次 build 就不需要重新下载编译 crates
 RUN mkdir src && \

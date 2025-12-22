@@ -189,7 +189,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
-name = "base_sniper_pro"
+name = "base_sniper"
 version = "0.2.0"
 dependencies = [
  "anyhow",

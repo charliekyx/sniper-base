@@ -1,5 +1,5 @@
 [package]
-name = "base_sniper_pro"
+name = "base_sniper"
 version = "0.2.0"
 edition = "2021"
 

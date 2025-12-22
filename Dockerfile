@@ -1,6 +1,5 @@
 # --- 第一阶段：构建环境 (Builder) ---
-FROM rust:1.75-slim-bookworm as builder
-
+FROM rust:latest as builder
 # 设置工作目录
 WORKDIR /usr/src/app
 

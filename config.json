@@ -6,5 +6,6 @@
   "target_wallets": [
     "0x0000000000000000000000000000000000000000"
   ],
-  "max_gas_gwei": 50
+  "max_gas_gwei": 50,
+  "private_key": "null"
 }

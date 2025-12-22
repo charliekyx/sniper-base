@@ -2,3 +2,4 @@ target/
 .git/
 shadow_trades.jsonl
 *.swp
+Cargo.lock

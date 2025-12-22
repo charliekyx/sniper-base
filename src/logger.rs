@@ -1,7 +1,6 @@
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
-use chrono::Local;
 
 #[derive(Serialize, Debug)]
 pub struct ShadowRecord {

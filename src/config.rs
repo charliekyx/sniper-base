@@ -10,7 +10,7 @@ pub struct AppConfig {
     pub copy_trade_enabled: bool, // 开关：跟单大佬
     pub shadow_mode: bool,      // 核心开关：True = 只记录不发送
     pub target_wallets: Vec<String>, // 大佬白名单
-    pub max_gas_gwei: u64,
+    // pub max_gas_gwei: u64,
 }
 
 impl AppConfig {

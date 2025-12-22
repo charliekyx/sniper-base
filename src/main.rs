@@ -6,7 +6,7 @@ mod constants;
 use crate::config::AppConfig;
 use crate::logger::{log_shadow_trade, ShadowRecord};
 use crate::simulation::Simulator;
-use crate::constants::{BASESWAP_ROUTER, ALIENBASE_ROUTER, get_router_name};
+use crate::constants::get_router_name;
 use ethers::prelude::*;
 use std::sync::Arc;
 use tokio::task;
@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
                             let mock_token = Address::random(); 
 
                             // 执行模拟
-                            let (success, profit, reason) = sim.simulate_bundle(
+                            let (success, profit, _reason) = sim.simulate_bundle(
                                 Some(tx.clone()), 
                                 to,
                                 U256::from(100000000000000000u64), // 模拟跟 0.1 ETH

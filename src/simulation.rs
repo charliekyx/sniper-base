@@ -1,17 +1,42 @@
 use crate::constants::WETH_BASE;
 use anyhow::Result;
-use ethers::abi::parse_abi; // [修复1] 显式引入 parse_abi
+use ethers::abi::parse_abi;
 use ethers::prelude::*;
 use ethers::types::{Address, Transaction, U256};
 use revm::{
-    db::{CacheDB, DatabaseRef, EthersDB},
+    db::{CacheDB, Database, DatabaseRef, EthersDB},
     primitives::{
-        AccountInfo, Address as rAddress, Bytecode, ExecutionResult, TransactTo, U256 as rU256,
+        AccountInfo, Address as rAddress, Bytecode, ExecutionResult, TransactTo, U256 as rU256, B256,
     },
     EVM,
 };
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+
+// Wrapper to make a `Database` into a `DatabaseRef` using interior mutability.
+// This is needed because `revm@3.5.0`'s `EthersDB` implements `Database` (&mut self)
+// but not `DatabaseRef` (&self), which `CacheDB` requires.
+struct MutexDB<DB>(Arc<Mutex<DB>>);
+
+impl<DB: Database> DatabaseRef for MutexDB<DB> {
+    type Error = DB::Error;
+
+    fn basic(&self, address: rAddress) -> Result<Option<AccountInfo>, Self::Error> {
+        self.0.lock().unwrap().basic(address)
+    }
+
+    fn code_by_hash(&self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.0.lock().unwrap().code_by_hash(code_hash)
+    }
+
+    fn storage(&self, address: rAddress, index: rU256) -> Result<rU256, Self::Error> {
+        self.0.lock().unwrap().storage(address, index)
+    }
+
+    fn block_hash(&self, number: rU256) -> Result<B256, Self::Error> {
+        self.0.lock().unwrap().block_hash(number)
+    }
+}
 
 pub struct Simulator {
     provider: Arc<Provider<Ws>>,
@@ -35,16 +60,15 @@ impl Simulator {
         // 创建 EthersDB (连接真实节点)
         let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into())).unwrap();
 
-        // [修复2] 创建 CacheDB (内存层)
-        // revm 3.5.0 中，CacheDB::new 需要一个 DatabaseRef。
-        // EthersDB 实现了 DatabaseRef，我们直接传入它的实例。
-
-        let mut cache_db = CacheDB::new(Box::new(ethers_db));
+        // Wrap EthersDB in our MutexDB to satisfy the `DatabaseRef` trait bound for CacheDB.
+        let ethers_db_wrapped = MutexDB(Arc::new(Mutex::new(ethers_db)));
+        let cache_db = CacheDB::new(ethers_db_wrapped);
+        
         let mut evm = EVM::new();
         evm.database(cache_db);
 
         // 配置环境 (Base Chain ID)
-        evm.env.cfg.chain_id = 8453.into();
+        evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(block_number + 1);
 
         // 2. 模拟 "我" 买入 (ETH -> Token)
@@ -60,26 +84,23 @@ impl Simulator {
         evm.db().unwrap().insert_account_info(my_wallet, acc_info);
 
         // 构造 swapExactETHForTokens 调用
-        let router_abi = BaseContract::from(
-            parse_abi(&["function swapExactETHForTokens(uint256,address[],address,uint256) external payable returns (uint256[])"]).unwrap()
-        );
+        let router_abi = parse_abi(&[
+            "function swapExactETHForTokens(uint,address[],address,uint) external payable returns (uint[])",
+            "function swapExactTokensForETH(uint,uint,address[],address,uint) external returns (uint[])"
+        ])?;
+        let router_contract = BaseContract::from(router_abi);
         let path = vec![*WETH_BASE, token_out];
         let deadline = U256::from(9999999999u64);
 
-        // [修复3] 类型转换 (ethers::Address -> revm::Address)
-        // 在 revm 3.5.0 中，需要手动转换类型，或者使用 unsafe/transmute，这里用安全的方法：
-        let revm_path: Vec<rAddress> = path.iter().map(|a| rAddress::from(a.0)).collect();
-        let revm_token_out = rAddress::from(token_out.0);
         let revm_router = rAddress::from(router_addr.0);
 
         // 编码 Calldata
-        // 注意：ethers 编码时使用 ethers 的类型
-        let calldata = router_abi.encode(
+        let calldata = router_contract.encode(
             "swapExactETHForTokens",
             (
                 U256::zero(),
                 path.clone(),
-                Address(my_wallet.0),
+                Address::from(my_wallet.0.0), // revm::Address -> ethers::Address
                 deadline,
             ),
         )?;
@@ -103,13 +124,13 @@ impl Simulator {
 
         // 3. 模拟 "我" 卖出
         let sell_path = vec![token_out, *WETH_BASE];
-        let sell_calldata = router_abi.encode(
+        let sell_calldata = router_contract.encode(
             "swapExactTokensForETH",
             (
                 token_balance,
                 U256::zero(),
                 sell_path,
-                Address::from(my_wallet.0),
+                Address::from(my_wallet.0.0), // revm::Address -> ethers::Address
                 deadline,
             ),
         )?;

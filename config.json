@@ -1,0 +1,15 @@
+{
+  "rpc_url": "wss://base-mainnet.public.blastapi.io",
+  "private_key": "",
+  "sniper_enabled": true,
+  "copy_trade_enabled": false,
+  "shadow_mode": true,
+  "target_wallets": [],
+  "buy_amount_eth": 0.005,
+  "gas_limit": 500000,
+  "max_priority_fee_gwei": 5,
+  "sniper_block_delay": 1,
+  "sell_strategy_2x_exit_half": true,
+  "sell_strategy_3x_exit_all": true,
+  "anti_rug_dip_threshold": 50
+}

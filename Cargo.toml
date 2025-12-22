@@ -1,34 +1,18 @@
 [package]
-name = "base_sniper_shadow"
-version = "0.1.0"
+name = "base_sniper_pro"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-# 核心以太坊库 (ethers 2.0 系列)
-ethers = { version = "2.0.14", features = ["ws", "ipc", "rustls", "abigen"] }
-
-# 异步运行时
+# 核心库
+ethers = { version = "2.0", features = ["ws", "ipc", "rustls", "abigen"] }
 tokio = { version = "1.0", features = ["full"] }
-
-# 错误处理
 anyhow = "1.0"
-
-# 序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-
-# 日志
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-appender = "0.2"
-
-# 时间处理
 chrono = "0.4"
-
-# 静态变量
 lazy_static = "1.4"
-hex = "0.4"
-zerocopy = "0.7" # 修复 as_bytes 问题
-
-# 关键：使用 revm 3.5.0，这是最后一代支持 ethers 的版本
+# 必须锁定 revm 版本以兼容 ethers
 revm = { version = "=3.5.0", features = ["ethersdb"] }

@@ -5,12 +5,23 @@ use std::str::FromStr;
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
-    pub rpc_url: String,        // 你的 Reth 节点 WS 地址
-    pub sniper_enabled: bool,   // 开关：狙击新币
-    pub copy_trade_enabled: bool, // 开关：跟单大佬
-    pub shadow_mode: bool,      // 核心开关：True = 只记录不发送
-    pub target_wallets: Vec<String>, // 大佬白名单
-    // pub max_gas_gwei: u64,
+    pub rpc_url: String,
+    pub private_key: String,       // 必填：用于实战交易
+    pub sniper_enabled: bool,
+    pub copy_trade_enabled: bool,
+    pub shadow_mode: bool,         // true = 模拟运行; false = 真钱交易
+    pub target_wallets: Vec<String>,
+    
+    // --- 资金与 Gas ---
+    pub buy_amount_eth: f64,       // 单次狙击金额 (ETH)
+    pub gas_limit: u64,            // 交易 Gas 上限 (防死循环/高耗费)
+    pub max_priority_fee_gwei: u64,// 贿赂矿工的小费
+    
+    // --- 防御与策略 ---
+    pub sniper_block_delay: u64,   // 延迟 N 个区块买入 (防开盘黑名单陷阱)
+    pub sell_strategy_2x_exit_half: bool, // 翻倍出本 (卖 50%)
+    pub sell_strategy_3x_exit_all: bool,  // 3倍清仓 (卖 100%)
+    pub anti_rug_dip_threshold: u64,      // 跌幅止损阈值 (例如 50 表示跌 50% 跑路)
 }
 
 impl AppConfig {

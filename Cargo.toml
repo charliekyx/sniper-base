@@ -15,4 +15,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = "0.4"
 lazy_static = "1.4"
 # 必须锁定 revm 版本以兼容 ethers
-revm = { version = "=3.5.0", features = ["ethersdb"] }
+revm = { version = "3.5.0", default-features = false, features = ["std", "ethersdb"] }

@@ -1,13 +1,15 @@
 mod config;
 mod constants;
 mod logger;
-mod simulation;
 mod persistence;
+mod simulation;
 
 use crate::config::AppConfig;
 use crate::constants::{get_router_name, WETH_BASE};
 use crate::logger::{log_shadow_trade, ShadowRecord};
-use crate::persistence::{init_storage, load_all_positions, remove_position, save_position, PositionData};
+use crate::persistence::{
+    init_storage, load_all_positions, remove_position, save_position, PositionData,
+};
 use crate::simulation::Simulator;
 use chrono::Local;
 use dotenv::dotenv;
@@ -171,10 +173,7 @@ async fn execute_buy_and_approve(
         Err(e) => {
             println!("!!! [ERROR] Buy Tx Failed immediately: {:?}", e);
             println!("!!! [RECOVERY] Attempting to resync Nonce from chain...");
-            if let Ok(real_nonce) = client
-                .get_transaction_count(client.address(), None)
-                .await
-            {
+            if let Ok(real_nonce) = client.get_transaction_count(client.address(), None).await {
                 nonce_manager.reset(real_nonce.as_u64());
             }
             return Err(e.into());
@@ -229,13 +228,7 @@ async fn execute_smart_sell(
         async move {
             let calldata = router.encode(
                 "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                (
-                    amt,
-                    U256::zero(),
-                    path,
-                    client.address(),
-                    deadline,
-                ),
+                (amt, U256::zero(), path, client.address(), deadline),
             )?;
 
             let gas_price = client.provider().get_gas_price().await?
@@ -302,9 +295,7 @@ async fn monitor_position(
         }
 
         // 修复：如果网络错误，不崩溃，而是等待重试
-        let balance: U256 = match token_contract
-            .method("balanceOf", client.address())
-        {
+        let balance: U256 = match token_contract.method("balanceOf", client.address()) {
             Ok(m) => match m.call().await {
                 Ok(b) => b,
                 Err(_) => {
@@ -327,21 +318,20 @@ async fn monitor_position(
             break;
         }
 
-        let amounts_out: Vec<U256> = match router_contract
-            .method("getAmountsOut", (balance, path.clone()))
-        {
-            Ok(m) => match m.call().await {
-                Ok(v) => v,
+        let amounts_out: Vec<U256> =
+            match router_contract.method("getAmountsOut", (balance, path.clone())) {
+                Ok(m) => match m.call().await {
+                    Ok(v) => v,
+                    Err(_) => {
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                },
                 Err(_) => {
                     sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-            },
-            Err(_) => {
-                sleep(Duration::from_millis(500)).await;
-                continue;
-            }
-        };
+            };
 
         let current_val = *amounts_out.last().unwrap_or(&U256::zero());
 
@@ -415,11 +405,11 @@ async fn process_transaction(
                 }
                 locks.insert(token_addr);
             }
-            
+
             // 使用 defer 模式（手动在所有退出点移除）比较繁琐
             // 这里我们采用一个简单的 cleanup 闭包逻辑，或者在函数结束处统一移除
             // 由于 Rust async 闭包复杂，我们手动在 exit points 移除
-            
+
             let cleanup = |token| {
                 if let Ok(mut locks) = processing_locks.lock() {
                     locks.remove(&token);
@@ -457,10 +447,7 @@ async fn process_transaction(
                 sim_res.unwrap_or((false, U256::zero(), U256::zero(), "Sim Error".to_string()));
 
             if !sim_ok {
-                println!(
-                    "   [ABORT] Simulation failed: {}. Likely Honeypot.",
-                    reason
-                );
+                println!("   [ABORT] Simulation failed: {}. Likely Honeypot.", reason);
                 cleanup(token_addr);
                 return;
             }
@@ -504,15 +491,13 @@ async fn process_transaction(
                             timestamp: Local::now().timestamp() as u64,
                         };
                         let _ = save_position(&pos_data);
-                        task::spawn(monitor_position(
-                            client, to, token_addr, buy_amt, config,
-                        ));
+                        task::spawn(monitor_position(client, to, token_addr, buy_amt, config));
                         // 注意：买入成功后，我们不在此时移除 Lock。
                         // 因为正在 Monitor 中，我们不希望同一个 Token 被再次买入。
                         // 锁会在程序重启或逻辑重置时自然释放。
                         // 如果你希望在 Monitor 结束后释放，需要将 cleanup 传进去，但这太复杂。
                         // 对于 Sniper，一个 Session 买一次即可。
-                        
+
                         // 为了防止 Set 无限膨胀，我们可以选择不 Remove，或者设置 TTL。
                         // 这里选择保留锁，直到程序重启。
                     }
@@ -526,43 +511,12 @@ async fn process_transaction(
     }
 }
 
-async fn run_shadow_mode(config: AppConfig) -> anyhow::Result<()> {
-    let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
-    let provider = Arc::new(provider);
-    let filter = Filter::new().address(vec![*WETH_BASE]);
-    let mut stream = provider.subscribe_logs(&filter).await?;
-    println!(">>> SHADOW MODE STARTED <<<");
-    while let Some(log) = stream.next().await {
-        if let Some(tx_hash) = log.transaction_hash {
-            if !config.use_private_node {
-                sleep(Duration::from_millis(100)).await;
-            }
-            let p = provider.clone();
-            task::spawn(async move {
-                if let Ok(Some(tx)) = p.get_transaction(tx_hash).await {
-                    if let Some((action, token_addr)) = decode_router_input(&tx.input) {
-                        let to = tx.to.unwrap_or_default();
-                        if get_router_name(&to) != "Unknown" {
-                            println!("\n[Shadow] {} | {:?}", action, token_addr);
-                        }
-                    }
-                }
-            });
-        }
-    }
-    Ok(())
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
     tracing_subscriber::fmt::init();
     let config = AppConfig::from_env();
-
-    if config.shadow_mode {
-        return run_shadow_mode(config).await;
-    }
-
+    
     println!("=== Base Sniper Pro (Optimized + Secure) ===");
     println!(
         "Mode: LIVE | Node: {}",

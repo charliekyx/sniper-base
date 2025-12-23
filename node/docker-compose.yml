@@ -48,7 +48,7 @@ services:
     command:
       - op-node
       - --network=base-mainnet
-      - --l1=https://eth-mainnet.g.alchemy.com/v2/ndY7QeJdjHKDPr2xfuGDZ
+      - --l1=https://eth-mainnet.g.alchemy.com/v2/JLA8cvXuOLpUMPIE53Zhp
       - --l1.beacon=https://ethereum-beacon-api.publicnode.com
       - --l2=http://execution:8551
       - --rpc.addr=0.0.0.0
@@ -59,6 +59,3 @@ services:
       - --l1.max-concurrency=5
       - --l1.rpc-max-batch-size=10
       - --syncmode=execution-layer
-      # 👇 删除了所有复杂的 p2p 参数，只保留 network=base-mainnet
-      # op-node 会自动内置官方引导节点，不需要我们手动配置！
-      # 我们之前手动配错了才导致的崩溃。

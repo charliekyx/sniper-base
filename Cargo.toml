@@ -4,11 +4,13 @@ version = "0.2.1"
 edition = "2021"
 
 [dependencies]
+# 核心库
 ethers = { version = "2.0.14", features = ["ws", "rustls", "abigen", "ipc"] }
 ethers-core = "2.0.14"
 ethers-providers = "2.0.14"
 tokio = { version = "1.0", features = ["full"] }
 anyhow = "1.0"
+# serde 依然保留用于日志或其他序列化，但不再用于读取 config.json
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tracing = "0.1"
@@ -17,8 +19,9 @@ chrono = "0.4"
 lazy_static = "1.4"
 revm = { version = "3.5.0", features = ["ethersdb", "std"] }
 rand = "0.8"
+# 新增：用于加载 .env 文件
+dotenv = "0.15"
 
-# Optimization Profile for Release Build
 [profile.release]
 opt-level = 3
 lto = "fat"

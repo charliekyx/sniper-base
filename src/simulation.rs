@@ -15,13 +15,11 @@ use std::cell::RefCell;
 use std::str::FromStr;
 use std::sync::Arc;
 
-// Lightweight wrapper, cloneable and thread-safe
 #[derive(Clone)]
 pub struct Simulator {
     provider: Arc<Provider<Ws>>,
 }
 
-// Wrapper to make EthersDB compatible with CacheDB
 pub struct ForkDB {
     backend: RefCell<EthersDB<Provider<Ws>>>,
 }
@@ -59,25 +57,22 @@ impl Simulator {
         Self { provider }
     }
 
-    // Removed &mut self, making it stateless and parallel-friendly
+    // Returns: (Success, Profit, ExpectedTokens, Reason)
     pub async fn simulate_bundle(
         &self,
         _target_tx: Option<Transaction>,
         router_addr: Address,
         amount_in_eth: U256,
         token_out: Address,
-    ) -> Result<(bool, U256, String)> {
+    ) -> Result<(bool, U256, U256, String)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
 
-        // 1. Initialize EthersDB
         let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
             .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
 
-        // 2. Wrap in ForkDB and then CacheDB
         let fork_db = ForkDB::new(ethers_db);
         let mut cache_db = CacheDB::new(fork_db);
 
-        // Prepare ABIs
         let router_abi = parse_abi(&[
             "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,address[],address,uint) external payable",
             "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,address[],address,uint) external",
@@ -93,9 +88,8 @@ impl Simulator {
         let revm_router = rAddress::from(router_addr.0);
         let revm_token = rAddress::from(token_out.0);
 
-        // 3. Setup simulation wallet
+        // Simulation wallet setup
         let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        // 10 ETH
         let initial_eth = rU256::from(10000000000000000000u128); 
 
         cache_db.insert_account_info(
@@ -108,17 +102,15 @@ impl Simulator {
             },
         );
 
-        // Create EVM instance
         let mut evm = EVM {
             env: Default::default(),
             db: Some(&mut cache_db),
         };
 
-        // Configure EVM environment
         evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(block_number + 1);
 
-        // Step 0: Get expected token amount
+        // Step 0: Get Expected Tokens
         let path = vec![*WETH_BASE, token_out];
         let amounts_out_calldata = router.encode("getAmountsOut", (amount_in_eth, path.clone()))?;
 
@@ -130,28 +122,23 @@ impl Simulator {
 
         let result_amounts = match evm.transact_commit() {
             Ok(result) => result,
-            Err(_) => return Ok((false, U256::zero(), "GetAmountsOut Failed".to_string())),
+            Err(_) => return Ok((false, U256::zero(), U256::zero(), "GetAmountsOut Failed".to_string())),
         };
 
         let expected_tokens: U256 = match result_amounts {
-            ExecutionResult::Success {
-                output: Output::Call(b),
-                ..
-            } => {
+            ExecutionResult::Success { output: Output::Call(b), .. } => {
                 let amounts: Vec<U256> = router.decode_output("getAmountsOut", b)?;
-                *amounts
-                    .last()
-                    .ok_or_else(|| anyhow::anyhow!("Empty amounts returned from router"))?
+                *amounts.last().ok_or_else(|| anyhow::anyhow!("Empty amounts"))?
             }
-            _ => return Ok((false, U256::zero(), "GetAmountsOut Failed".to_string())),
+            _ => return Ok((false, U256::zero(), U256::zero(), "GetAmountsOut Failed".to_string())),
         };
 
-        // Step 1: Simulate buy
+        // Step 1: Buy
         let deadline = U256::from(9999999999u64);
         let buy_calldata = router.encode(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
             (
-                U256::zero(),
+                U256::zero(), // Simulate with 0 slippage is fine for checking if it reverts
                 path.clone(),
                 Address::from(my_wallet.0 .0),
                 deadline,
@@ -165,50 +152,36 @@ impl Simulator {
         evm.env.tx.gas_limit = 500_000;
 
         if evm.transact_commit().is_err() {
-            return Ok((false, U256::zero(), "Buy Reverted".to_string()));
+            return Ok((false, U256::zero(), U256::zero(), "Buy Reverted".to_string()));
         }
 
-        // Step 2: Check token balance
+        // Step 2: Check Balance
         let balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
         evm.env.tx.transact_to = TransactTo::Call(revm_token);
         evm.env.tx.data = balance_calldata.0.into();
         evm.env.tx.value = rU256::ZERO;
 
         let token_balance: U256 = match evm.transact_commit() {
-            Ok(ExecutionResult::Success {
-                output: Output::Call(b),
-                ..
-            }) => token.decode_output("balanceOf", b)?,
-            _ => return Ok((false, U256::zero(), "Balance Check Failed".to_string())),
+            Ok(ExecutionResult::Success { output: Output::Call(b), .. }) => token.decode_output("balanceOf", b)?,
+            _ => return Ok((false, U256::zero(), U256::zero(), "Balance Check Failed".to_string())),
         };
 
         if token_balance.is_zero() {
-            return Ok((
-                false,
-                U256::zero(),
-                "Zero Tokens Received (High Tax?)".to_string(),
-            ));
+            return Ok((false, U256::zero(), U256::zero(), "Zero Tokens (High Tax?)".to_string()));
         }
 
-        // Tax check
+        // Tax Check
         if token_balance * 10 < expected_tokens * 8 {
-            return Ok((
-                false,
-                U256::zero(),
-                format!(
-                    "High Buy Tax Detected! Exp: {} Got: {}",
-                    expected_tokens, token_balance
-                ),
-            ));
+            return Ok((false, U256::zero(), expected_tokens, format!("High Buy Tax! Exp: {} Got: {}", expected_tokens, token_balance)));
         }
 
-        // Step 3: Approve tokens
+        // Step 3: Approve
         let approve_calldata = token.encode("approve", (router_addr, U256::MAX))?;
         evm.env.tx.transact_to = TransactTo::Call(revm_token);
         evm.env.tx.data = approve_calldata.0.into();
         evm.transact_commit().ok();
 
-        // Step 4: Simulate sell
+        // Step 4: Sell
         let sell_path = vec![token_out, *WETH_BASE];
         let sell_calldata = router.encode(
             "swapExactTokensForETHSupportingFeeOnTransferTokens",
@@ -226,28 +199,16 @@ impl Simulator {
         evm.env.tx.data = sell_calldata.0.into();
 
         if evm.transact_commit().is_err() {
-            return Ok((
-                false,
-                U256::zero(),
-                "HONEYPOT DETECTED: Sell Reverted".to_string(),
-            ));
+            return Ok((false, U256::zero(), expected_tokens, "HONEYPOT: Sell Reverted".to_string()));
         }
 
-        // Step 5: Calculate final result
-        let final_eth = cache_db
-            .basic(my_wallet)
-            .map_err(|_| anyhow::anyhow!("Failed to get balance"))?
-            .unwrap()
-            .balance;
+        // Step 5: Profit Calc
+        let final_eth = cache_db.basic(my_wallet).map_err(|_| anyhow::anyhow!("Failed"))?.unwrap().balance;
 
         if final_eth > initial_eth {
-            Ok((
-                true,
-                U256::from((final_eth - initial_eth).to_be_bytes::<32>()),
-                "Profitable".to_string(),
-            ))
+            Ok((true, U256::from((final_eth - initial_eth).to_be_bytes::<32>()), expected_tokens, "Profitable".to_string()))
         } else {
-            Ok((true, U256::zero(), "Sellable but Loss".to_string()))
+            Ok((true, U256::zero(), expected_tokens, "Sellable but Loss".to_string()))
         }
     }
 }

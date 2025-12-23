@@ -7,7 +7,7 @@ services:
     restart: unless-stopped  # 如果程序崩溃或重启服务器，自动重启
     volumes:
       # 1. 挂载配置文件 (本地改了重启容器即生效)
-      - ./config.json:/app/config.json
+      - ./.env:/app/.env
       # 2. 挂载数据文件 (确保 shadow 模式的数据写在宿主机上，不会丢失)
       - ./shadow_trades.jsonl:/app/shadow_trades.jsonl
     environment:

@@ -12,7 +12,6 @@ use revm::{
     Database, EVM,
 };
 use std::cell::RefCell;
-use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -57,9 +56,10 @@ impl Simulator {
         Self { provider }
     }
 
-    // Returns: (Success, Profit, ExpectedTokens, Reason)
+    // 更新：增加 origin 参数，模拟真实身份
     pub async fn simulate_bundle(
         &self,
+        origin: Address, // 你的钱包地址
         _target_tx: Option<Transaction>,
         router_addr: Address,
         amount_in_eth: U256,
@@ -87,10 +87,12 @@ impl Simulator {
         let token = BaseContract::from(erc20_abi);
         let revm_router = rAddress::from(router_addr.0);
         let revm_token = rAddress::from(token_out.0);
-
-        // Simulation wallet setup
-        let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        let initial_eth = rU256::from(10000000000000000000u128); 
+        
+        // 使用你的真实地址作为模拟发起人
+        let my_wallet = rAddress::from(origin.0);
+        
+        // 赋予初始资金 (100 ETH) 用于模拟
+        let initial_eth = rU256::from(100000000000000000000u128); 
 
         cache_db.insert_account_info(
             my_wallet,
@@ -138,7 +140,7 @@ impl Simulator {
         let buy_calldata = router.encode(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
             (
-                U256::zero(), // Simulate with 0 slippage is fine for checking if it reverts
+                U256::zero(), 
                 path.clone(),
                 Address::from(my_wallet.0 .0),
                 deadline,
@@ -170,7 +172,6 @@ impl Simulator {
             return Ok((false, U256::zero(), U256::zero(), "Zero Tokens (High Tax?)".to_string()));
         }
 
-        // Tax Check
         if token_balance * 10 < expected_tokens * 8 {
             return Ok((false, U256::zero(), expected_tokens, format!("High Buy Tax! Exp: {} Got: {}", expected_tokens, token_balance)));
         }
@@ -202,7 +203,6 @@ impl Simulator {
             return Ok((false, U256::zero(), expected_tokens, "HONEYPOT: Sell Reverted".to_string()));
         }
 
-        // Step 5: Profit Calc
         let final_eth = cache_db.basic(my_wallet).map_err(|_| anyhow::anyhow!("Failed"))?.unwrap().balance;
 
         if final_eth > initial_eth {

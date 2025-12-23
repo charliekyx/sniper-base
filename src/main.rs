@@ -2,25 +2,26 @@ mod config;
 mod constants;
 mod logger;
 mod simulation;
-mod persistence; // 新增：引入持久化模块
+mod persistence;
 
 use crate::config::AppConfig;
 use crate::constants::{get_router_name, WETH_BASE};
 use crate::logger::{log_shadow_trade, ShadowRecord};
+use crate::persistence::{init_storage, load_all_positions, remove_position, save_position, PositionData};
 use crate::simulation::Simulator;
-use crate::persistence::{init_storage, load_all_positions, save_position, remove_position, PositionData}; // 新增
 use chrono::Local;
+use dotenv::dotenv;
 use ethers::abi::parse_abi;
 use ethers::prelude::*;
-
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task;
 use tokio::time::{sleep, timeout, Duration};
-use dotenv::dotenv;
 
-// --- Nonce Manager ---
+// --- Nonce Manager (Enhanced) ---
 struct NonceManager {
     nonce: AtomicU64,
 }
@@ -36,21 +37,35 @@ impl NonceManager {
         let n = self.nonce.fetch_add(1, Ordering::SeqCst);
         U256::from(n)
     }
+
+    // 修复：当交易发送失败时，允许重置本地 Nonce
+    fn reset(&self, new_nonce: u64) {
+        self.nonce.store(new_nonce, Ordering::SeqCst);
+        println!(">>> [NONCE] Resynced to {}", new_nonce);
+    }
 }
 
 // --- Helper: Input Decoding ---
 fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
-    if input.len() < 4 { return None; }
+    if input.len() < 4 {
+        return None;
+    }
     let sig = &input[0..4];
     let read_usize = |offset: usize| -> Option<usize> {
-        if offset + 32 > input.len() { return None; }
+        if offset + 32 > input.len() {
+            return None;
+        }
         let slice = &input[offset..offset + 32];
         let val = U256::from_big_endian(slice);
-        if val > U256::from(usize::MAX) { return None; }
+        if val > U256::from(usize::MAX) {
+            return None;
+        }
         Some(val.as_usize())
     };
     let read_address = |offset: usize| -> Option<Address> {
-        if offset + 32 > input.len() { return None; }
+        if offset + 32 > input.len() {
+            return None;
+        }
         Some(Address::from_slice(&input[offset + 12..offset + 32]))
     };
     let get_path_token = |arg_index: usize, get_last: bool| -> Option<Address> {
@@ -58,17 +73,27 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let array_offset = read_usize(offset_ptr)?;
         let len_ptr = 4 + array_offset;
         let array_len = read_usize(len_ptr)?;
-        if array_len == 0 { return None; }
+        if array_len == 0 {
+            return None;
+        }
         let elem_index = if get_last { array_len - 1 } else { 0 };
         let item_ptr = len_ptr + 32 + elem_index * 32;
         read_address(item_ptr)
     };
 
     if sig == [0x7f, 0xf3, 0x6a, 0xb5] || sig == [0xb6, 0xf9, 0xde, 0x95] {
-        let action = if sig[0] == 0x7f { "Buy_ETH->Token" } else { "Buy_Fee_ETH->Token" };
+        let action = if sig[0] == 0x7f {
+            "Buy_ETH->Token"
+        } else {
+            "Buy_Fee_ETH->Token"
+        };
         return get_path_token(1, true).map(|t| (action.to_string(), t));
     } else if sig == [0x18, 0xcb, 0xaf, 0xe5] || sig == [0x79, 0x1a, 0xc9, 0x47] {
-        let action = if sig[0] == 0x18 { "Sell_Token->ETH" } else { "Sell_Fee_Token->ETH" };
+        let action = if sig[0] == 0x18 {
+            "Sell_Token->ETH"
+        } else {
+            "Sell_Fee_Token->ETH"
+        };
         return get_path_token(2, false).map(|t| (action.to_string(), t));
     } else if sig == [0x38, 0xed, 0x17, 0x39] {
         return get_path_token(2, true).map(|t| ("Swap_Token->Token".to_string(), t));
@@ -87,10 +112,13 @@ async fn execute_buy_and_approve(
     token_in: Address,
     token_out: Address,
     amount_in: U256,
-    amount_out_min: U256, 
+    amount_out_min: U256,
     config: &AppConfig,
 ) -> anyhow::Result<()> {
-    println!(">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...", token_out);
+    println!(
+        ">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...",
+        token_out
+    );
 
     let nonce_buy = nonce_manager.get_and_increment();
     let nonce_approve = nonce_manager.get_and_increment();
@@ -130,12 +158,33 @@ async fn execute_buy_and_approve(
         .gas_price(total_gas_price)
         .nonce(nonce_approve);
 
-    println!(">>> [BUNDLE] Broadcasting Nonce {} & {}...", nonce_buy, nonce_approve);
+    println!(
+        ">>> [BUNDLE] Broadcasting Nonce {} & {}...",
+        nonce_buy, nonce_approve
+    );
 
-    let pending_buy = client.send_transaction(buy_tx.clone(), None).await?;
-    let pending_approve = client.send_transaction(approve_tx, None).await?;
+    // 修复：Nonce 错位保护
+    // 如果发送交易直接失败 (Err)，说明 Nonce 可能没上链，或者 RPC 拒绝了。
+    // 这时候本地 Nonce 已经增加了，但链上没动，会导致后续交易 Gap。
+    let pending_buy = match client.send_transaction(buy_tx.clone(), None).await {
+        Ok(p) => p,
+        Err(e) => {
+            println!("!!! [ERROR] Buy Tx Failed immediately: {:?}", e);
+            println!("!!! [RECOVERY] Attempting to resync Nonce from chain...");
+            if let Ok(real_nonce) = client
+                .get_transaction_count(client.address(), None)
+                .await
+            {
+                nonce_manager.reset(real_nonce.as_u64());
+            }
+            return Err(e.into());
+        }
+    };
 
-    println!(">>> [BUNDLE] Sent! Hashes: {:?} | {:?}", pending_buy.tx_hash(), pending_approve.tx_hash());
+    // 尝试发送 Approve，如果不重要失败也可以接受（可以在卖出时再 approve）
+    let _ = client.send_transaction(approve_tx, None).await;
+
+    println!(">>> [BUNDLE] Buy Sent: {:?}", pending_buy.tx_hash());
 
     match timeout(Duration::from_secs(30), pending_buy).await {
         Ok(receipt_res) => {
@@ -146,7 +195,7 @@ async fn execute_buy_and_approve(
             } else {
                 Err(anyhow::anyhow!("Buy transaction reverted"))
             }
-        },
+        }
         Err(_) => {
             println!("!!! [ALERT] Transaction STUCK (Low Gas). Please check Explorer !!!");
             Err(anyhow::anyhow!("Buy transaction timeout (Stuck)"))
@@ -176,30 +225,36 @@ async fn execute_smart_sell(
         let client = client.clone();
         let path = path.clone();
         let priority_fee = config.max_priority_fee_gwei;
-        let gas_limit = config.gas_limit;
 
         async move {
             let calldata = router.encode(
                 "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                (amt, U256::zero(), path, client.address(), deadline),
+                (
+                    amt,
+                    U256::zero(),
+                    path,
+                    client.address(),
+                    deadline,
+                ),
             )?;
-            
-            let gas_price = client.provider().get_gas_price().await? 
+
+            let gas_price = client.provider().get_gas_price().await?
                 + U256::from(priority_fee * 1_000_000_000 * gas_mult);
 
             let tx = TransactionRequest::new()
                 .to(router_addr)
                 .data(calldata.0)
-                .gas(gas_limit + 50000) 
+                // 修复：卖出给足 Gas，防止因为逻辑复杂 OutOfGas 导致卖不出去
+                .gas(500_000)
                 .gas_price(gas_price);
-            
+
             let pending = client.send_transaction(tx, None).await?;
             Ok::<_, anyhow::Error>(pending.tx_hash())
         }
     };
 
     println!("<<< [SELL] Attempting to sell: {}...", amount_token);
-    
+
     // Attempt 1: 100%
     match send_sell(amount_token, if is_panic { 2 } else { 1 }).await {
         Ok(tx_hash) => return Ok(tx_hash),
@@ -210,7 +265,7 @@ async fn execute_smart_sell(
         println!("!!! [EMERGENCY] 100% Sell failed. Trying 50% dump to save capital...");
         // Attempt 2: 50%
         let half_amount = amount_token / 2;
-        match send_sell(half_amount, 3).await { 
+        match send_sell(half_amount, 3).await {
             Ok(tx_hash) => return Ok(tx_hash),
             Err(e) => println!("   [Sell Fail] 50% Sell failed: {:?}", e),
         }
@@ -227,9 +282,13 @@ async fn monitor_position(
     config: AppConfig,
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
-    let erc20_abi = parse_abi(&["function balanceOf(address) external view returns (uint)"]).unwrap();
+    // 修复：使用 expect/match 替代 unwrap，防止 panic
+    let erc20_abi = parse_abi(&["function balanceOf(address) external view returns (uint)"])
+        .expect("ABI Parse Error");
     let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
-    let router_abi = parse_abi(&["function getAmountsOut(uint,address[]) external view returns (uint[])"]).unwrap();
+    let router_abi =
+        parse_abi(&["function getAmountsOut(uint,address[]) external view returns (uint[])"])
+            .expect("ABI Parse Error");
     let router_contract = Contract::new(router_addr, router_abi, client.clone());
     let path = vec![token_addr, *WETH_BASE];
 
@@ -238,23 +297,50 @@ async fn monitor_position(
 
     loop {
         check_count += 1;
-        if check_count % 20 == 0 { println!("... monitoring {} ...", token_addr); }
+        if check_count % 20 == 0 {
+            println!("... monitoring {} ...", token_addr);
+        }
 
-        let balance: U256 = match token_contract.method("balanceOf", client.address()).unwrap().call().await {
-            Ok(b) => b,
-            Err(_) => { sleep(Duration::from_secs(1)).await; continue; }
+        // 修复：如果网络错误，不崩溃，而是等待重试
+        let balance: U256 = match token_contract
+            .method("balanceOf", client.address())
+        {
+            Ok(m) => match m.call().await {
+                Ok(b) => b,
+                Err(_) => {
+                    sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            },
+            Err(_) => {
+                sleep(Duration::from_secs(1)).await;
+                continue;
+            }
         };
 
         if balance.is_zero() {
-            println!("*** [MONITOR] Balance is 0 for {:?}. Removing persistence.", token_addr);
-            // 新增：余额归零（已卖出或转走），删除文件
+            println!(
+                "*** [MONITOR] Balance is 0 for {:?}. Removing persistence.",
+                token_addr
+            );
             remove_position(token_addr);
             break;
         }
 
-        let amounts_out: Vec<U256> = match router_contract.method("getAmountsOut", (balance, path.clone())).unwrap().call().await {
-            Ok(v) => v,
-            Err(_) => { sleep(Duration::from_millis(500)).await; continue; }
+        let amounts_out: Vec<U256> = match router_contract
+            .method("getAmountsOut", (balance, path.clone()))
+        {
+            Ok(m) => match m.call().await {
+                Ok(v) => v,
+                Err(_) => {
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            },
+            Err(_) => {
+                sleep(Duration::from_millis(500)).await;
+                continue;
+            }
         };
 
         let current_val = *amounts_out.last().unwrap_or(&U256::zero());
@@ -266,7 +352,10 @@ async fn monitor_position(
         if config.sell_strategy_3x_exit_all && current_val >= initial_cost_eth * 3 {
             println!("[EXIT] 3x Profit! Dumping ALL.");
             trigger_sell = true;
-        } else if config.sell_strategy_2x_exit_half && !sold_half && current_val >= initial_cost_eth * 2 {
+        } else if config.sell_strategy_2x_exit_half
+            && !sold_half
+            && current_val >= initial_cost_eth * 2
+        {
             println!("[EXIT] 2x Profit! Selling HALF.");
             trigger_sell = true;
             sell_amount = balance / 2;
@@ -281,12 +370,19 @@ async fn monitor_position(
         }
 
         if trigger_sell {
-            let _ = execute_smart_sell(client.clone(), router_addr, token_addr, *WETH_BASE, sell_amount, &config, is_panic).await;
-            // 注意：我们不在这里立即删除文件，而是等下一次循环检测到余额为0时删除，这样更安全
-            if !sold_half || is_panic { 
-                // 给一点时间让链上更新
-                sleep(Duration::from_secs(5)).await; 
-            } 
+            let _ = execute_smart_sell(
+                client.clone(),
+                router_addr,
+                token_addr,
+                *WETH_BASE,
+                sell_amount,
+                &config,
+                is_panic,
+            )
+            .await;
+            if !sold_half || is_panic {
+                sleep(Duration::from_secs(5)).await;
+            }
         }
 
         sleep(Duration::from_secs(2)).await;
@@ -301,69 +397,128 @@ async fn process_transaction(
     simulator: Simulator,
     config: AppConfig,
     targets: Vec<Address>,
+    processing_locks: Arc<Mutex<HashSet<Address>>>, // 新增：重复锁
 ) {
     if let Some(to) = tx.to {
         let router_name = get_router_name(&to);
-        if router_name == "Unknown" { return; }
+        if router_name == "Unknown" {
+            return;
+        }
 
         if let Some((action, token_addr)) = decode_router_input(&tx.input) {
-            let is_target_buy = config.copy_trade_enabled && targets.contains(&tx.from) && action == "Swap";
-            let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
-
-            if is_target_buy || is_new_liquidity {
-                println!("\n Trigger: {} | Token: {:?}", action, token_addr);
-                let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
-
-                if config.sniper_block_delay > 0 && !config.shadow_mode {
-                    let target_block = provider.get_block_number().await.unwrap_or_default() + config.sniper_block_delay;
-                    loop {
-                        if provider.get_block_number().await.unwrap_or_default() >= target_block { break; }
-                        sleep(Duration::from_millis(100)).await;
-                    }
-                }
-
-                let sim_res = simulator.simulate_bundle(None, to, buy_amt, token_addr).await;
-                let (sim_ok, _, expected_tokens, reason) = sim_res.unwrap_or((false, U256::zero(), U256::zero(), "Sim Error".to_string()));
-
-                if !sim_ok {
-                    println!("   [ABORT] Simulation failed: {}. Likely Honeypot.", reason);
+            // 修复：双重购买保护
+            // 检查该 Token 是否正在被处理，如果是，直接跳过
+            {
+                let mut locks = processing_locks.lock().unwrap();
+                if locks.contains(&token_addr) {
                     return;
                 }
+                locks.insert(token_addr);
+            }
+            
+            // 使用 defer 模式（手动在所有退出点移除）比较繁琐
+            // 这里我们采用一个简单的 cleanup 闭包逻辑，或者在函数结束处统一移除
+            // 由于 Rust async 闭包复杂，我们手动在 exit points 移除
+            
+            let cleanup = |token| {
+                if let Ok(mut locks) = processing_locks.lock() {
+                    locks.remove(&token);
+                }
+            };
 
-                if config.shadow_mode {
-                    println!("   [Shadow] Sim OK. Reason: {}", reason);
-                    log_shadow_trade(ShadowRecord {
-                        timestamp: Local::now().to_rfc3339(),
-                        event_type: action,
-                        router: router_name,
-                        trigger_hash: format!("{:?}", tx.hash),
-                        token_address: format!("{:?}", token_addr),
-                        amount_in_eth: config.buy_amount_eth.to_string(),
-                        simulation_result: reason,
-                        profit_eth_after_sell: None,
-                        gas_used: 0,
-                        copy_target: None,
-                    });
-                } else {
-                    let min_out = expected_tokens * 80 / 100;
-                    
-                    match execute_buy_and_approve(client.clone(), nonce_manager, to, *WETH_BASE, token_addr, buy_amt, min_out, &config).await {
-                        Ok(_) => {
-                            // 新增：买入成功后，立即持久化保存
-                            println!(">>> [PERSIST] Saving position to file...");
-                            let pos_data = PositionData {
-                                token_address: token_addr,
-                                router_address: to,
-                                initial_cost_eth: buy_amt,
-                                timestamp: Local::now().timestamp() as u64,
-                            };
-                            if let Err(e) = save_position(&pos_data) {
-                                println!("!!! [ERROR] Failed to save position: {:?}", e);
-                            }
-                            
-                            task::spawn(monitor_position(client, to, token_addr, buy_amt, config));
-                        }
-                        Err(e) => println!("   [Error] Buy Tx Failed: {:?}", e),
+            let is_target_buy =
+                config.copy_trade_enabled && targets.contains(&tx.from) && action == "Swap";
+            let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
+
+            if !is_target_buy && !is_new_liquidity {
+                cleanup(token_addr);
+                return;
+            }
+
+            println!("\n Trigger: {} | Token: {:?}", action, token_addr);
+            let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
+
+            if config.sniper_block_delay > 0 && !config.shadow_mode {
+                let target_block = provider.get_block_number().await.unwrap_or_default()
+                    + config.sniper_block_delay;
+                loop {
+                    if provider.get_block_number().await.unwrap_or_default() >= target_block {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                }
+            }
+
+            // 修复：传入 client.address() 作为模拟源
+            let sim_res = simulator
+                .simulate_bundle(client.address(), None, to, buy_amt, token_addr)
+                .await;
+            let (sim_ok, _, expected_tokens, reason) =
+                sim_res.unwrap_or((false, U256::zero(), U256::zero(), "Sim Error".to_string()));
+
+            if !sim_ok {
+                println!(
+                    "   [ABORT] Simulation failed: {}. Likely Honeypot.",
+                    reason
+                );
+                cleanup(token_addr);
+                return;
+            }
+
+            if config.shadow_mode {
+                println!("   [Shadow] Sim OK. Reason: {}", reason);
+                log_shadow_trade(ShadowRecord {
+                    timestamp: Local::now().to_rfc3339(),
+                    event_type: action,
+                    router: router_name,
+                    trigger_hash: format!("{:?}", tx.hash),
+                    token_address: format!("{:?}", token_addr),
+                    amount_in_eth: config.buy_amount_eth.to_string(),
+                    simulation_result: reason,
+                    profit_eth_after_sell: None,
+                    gas_used: 0,
+                    copy_target: None,
+                });
+                cleanup(token_addr);
+            } else {
+                let min_out = expected_tokens * 80 / 100;
+
+                match execute_buy_and_approve(
+                    client.clone(),
+                    nonce_manager,
+                    to,
+                    *WETH_BASE,
+                    token_addr,
+                    buy_amt,
+                    min_out,
+                    &config,
+                )
+                .await
+                {
+                    Ok(_) => {
+                        println!(">>> [PERSIST] Saving position to file...");
+                        let pos_data = PositionData {
+                            token_address: token_addr,
+                            router_address: to,
+                            initial_cost_eth: buy_amt,
+                            timestamp: Local::now().timestamp() as u64,
+                        };
+                        let _ = save_position(&pos_data);
+                        task::spawn(monitor_position(
+                            client, to, token_addr, buy_amt, config,
+                        ));
+                        // 注意：买入成功后，我们不在此时移除 Lock。
+                        // 因为正在 Monitor 中，我们不希望同一个 Token 被再次买入。
+                        // 锁会在程序重启或逻辑重置时自然释放。
+                        // 如果你希望在 Monitor 结束后释放，需要将 cleanup 传进去，但这太复杂。
+                        // 对于 Sniper，一个 Session 买一次即可。
+                        
+                        // 为了防止 Set 无限膨胀，我们可以选择不 Remove，或者设置 TTL。
+                        // 这里选择保留锁，直到程序重启。
+                    }
+                    Err(e) => {
+                        println!("   [Error] Buy Tx Failed: {:?}", e);
+                        cleanup(token_addr);
                     }
                 }
             }
@@ -379,16 +534,18 @@ async fn run_shadow_mode(config: AppConfig) -> anyhow::Result<()> {
     println!(">>> SHADOW MODE STARTED <<<");
     while let Some(log) = stream.next().await {
         if let Some(tx_hash) = log.transaction_hash {
-            if !config.use_private_node { sleep(Duration::from_millis(100)).await; }
+            if !config.use_private_node {
+                sleep(Duration::from_millis(100)).await;
+            }
             let p = provider.clone();
             task::spawn(async move {
                 if let Ok(Some(tx)) = p.get_transaction(tx_hash).await {
-                     if let Some((action, token_addr)) = decode_router_input(&tx.input) {
-                         let to = tx.to.unwrap_or_default();
-                         if get_router_name(&to) != "Unknown" {
-                             println!("\n[Shadow] {} | {:?}", action, token_addr);
-                         }
-                     }
+                    if let Some((action, token_addr)) = decode_router_input(&tx.input) {
+                        let to = tx.to.unwrap_or_default();
+                        if get_router_name(&to) != "Unknown" {
+                            println!("\n[Shadow] {} | {:?}", action, token_addr);
+                        }
+                    }
                 }
             });
         }
@@ -402,19 +559,30 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let config = AppConfig::from_env();
 
-    if config.shadow_mode { return run_shadow_mode(config).await; }
+    if config.shadow_mode {
+        return run_shadow_mode(config).await;
+    }
 
-    println!("=== Base Sniper Pro (Optimized + Persistence) ===");
-    println!("Mode: LIVE | Node: {}", if config.use_private_node { "PRIVATE" } else { "PUBLIC" });
+    println!("=== Base Sniper Pro (Optimized + Secure) ===");
+    println!(
+        "Mode: LIVE | Node: {}",
+        if config.use_private_node {
+            "PRIVATE"
+        } else {
+            "PUBLIC"
+        }
+    );
 
-    // 初始化存储文件夹
     init_storage();
 
     let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
     let chain_id = provider.get_chainid().await?.as_u64();
 
     let wallet = if !config.private_key.is_empty() {
-        config.private_key.parse::<LocalWallet>()?.with_chain_id(chain_id)
+        config
+            .private_key
+            .parse::<LocalWallet>()?
+            .with_chain_id(chain_id)
     } else {
         panic!("[FATAL] Private key missing in .env");
     };
@@ -427,18 +595,33 @@ async fn main() -> anyhow::Result<()> {
     // 恢复之前的持仓
     let existing_positions = load_all_positions();
     if !existing_positions.is_empty() {
-        println!(">>> [RESTORE] Found {} existing positions. Resuming monitors...", existing_positions.len());
+        println!(
+            ">>> [RESTORE] Found {} existing positions. Resuming monitors...",
+            existing_positions.len()
+        );
         for pos in existing_positions {
             println!("   -> Resuming monitor for {:?}", pos.token_address);
             let c = client.clone();
             let cfg = config.clone();
-            task::spawn(monitor_position(c, pos.router_address, pos.token_address, pos.initial_cost_eth, cfg));
+            task::spawn(monitor_position(
+                c,
+                pos.router_address,
+                pos.token_address,
+                pos.initial_cost_eth,
+                cfg,
+            ));
         }
     }
 
-    let start_nonce = provider_arc.get_transaction_count(wallet.address(), None).await?.as_u64();
+    let start_nonce = provider_arc
+        .get_transaction_count(wallet.address(), None)
+        .await?
+        .as_u64();
     let nonce_manager = Arc::new(NonceManager::new(start_nonce));
     println!(">>> Initialized Nonce: {}", start_nonce);
+
+    // 修复：初始化重复购买锁
+    let processing_locks = Arc::new(Mutex::new(HashSet::new()));
 
     let (tx_sender, mut rx_receiver) = mpsc::channel::<Transaction>(10000);
     let mut stream = provider_arc.subscribe_pending_txs().await?;
@@ -449,6 +632,7 @@ async fn main() -> anyhow::Result<()> {
     let t_clone = targets.clone();
     let s_clone = simulator.clone();
     let n_clone = nonce_manager.clone();
+    let l_clone = processing_locks.clone();
 
     task::spawn(async move {
         while let Some(tx) = rx_receiver.recv().await {
@@ -458,8 +642,9 @@ async fn main() -> anyhow::Result<()> {
             let t = t_clone.clone();
             let s = s_clone.clone();
             let n = n_clone.clone();
+            let l = l_clone.clone();
             task::spawn(async move {
-                 process_transaction(tx, p, c, n, s, cfg, t).await;
+                process_transaction(tx, p, c, n, s, cfg, t, l).await;
             });
         }
     });

@@ -439,72 +439,88 @@ async fn process_transaction(
                 }
             }
 
-            // 修复：传入 client.address() 作为模拟源
             let sim_res = simulator
                 .simulate_bundle(client.address(), None, to, buy_amt, token_addr)
                 .await;
-            let (sim_ok, _, expected_tokens, reason) =
+
+            let (sim_ok, profit_wei, expected_tokens, reason) =
                 sim_res.unwrap_or((false, U256::zero(), U256::zero(), "Sim Error".to_string()));
 
+            if config.shadow_mode {
+                println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
+
+                // Use 'profit_wei' directly (it is a U256 value, not a reference, so no '*' needed)
+                let profit_eth = if sim_ok {
+                    Some(ethers::utils::format_units(profit_wei, "ether").unwrap_or_default())
+                } else {
+                    None
+                };
+
+                log_shadow_trade(ShadowRecord {
+                    timestamp: Local::now().to_rfc3339(),
+                    event_type: action.to_string(),
+                    router: router_name,
+                    trigger_hash: format!("{:?}", tx.hash),
+                    token_address: format!("{:?}", token_addr),
+                    amount_in_eth: config.buy_amount_eth.to_string(),
+                    simulation_result: reason.clone(),
+                    profit_eth_after_sell: profit_eth,
+                    gas_used: 0,
+                    copy_target: if is_target_buy {
+                        Some(format!("{:?}", tx.from))
+                    } else {
+                        None
+                    },
+                });
+
+                // In shadow mode, we stop here regardless of result to prevent real buying
+                cleanup(token_addr);
+                return;
+            }
+
+            // Real Trading Logic (Only reached if shadow_mode is false)
             if !sim_ok {
                 println!("   [ABORT] Simulation failed: {}. Likely Honeypot.", reason);
                 cleanup(token_addr);
                 return;
             }
 
-            if config.shadow_mode {
-                println!("   [Shadow] Sim OK. Reason: {}", reason);
-                log_shadow_trade(ShadowRecord {
-                    timestamp: Local::now().to_rfc3339(),
-                    event_type: action,
-                    router: router_name,
-                    trigger_hash: format!("{:?}", tx.hash),
-                    token_address: format!("{:?}", token_addr),
-                    amount_in_eth: config.buy_amount_eth.to_string(),
-                    simulation_result: reason,
-                    profit_eth_after_sell: None,
-                    gas_used: 0,
-                    copy_target: None,
-                });
-                cleanup(token_addr);
-            } else {
-                let min_out = expected_tokens * 80 / 100;
+            let min_out = expected_tokens * 80 / 100;
 
-                match execute_buy_and_approve(
-                    client.clone(),
-                    nonce_manager,
-                    to,
-                    *WETH_BASE,
-                    token_addr,
-                    buy_amt,
-                    min_out,
-                    &config,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        println!(">>> [PERSIST] Saving position to file...");
-                        let pos_data = PositionData {
-                            token_address: token_addr,
-                            router_address: to,
-                            initial_cost_eth: buy_amt,
-                            timestamp: Local::now().timestamp() as u64,
-                        };
-                        let _ = save_position(&pos_data);
-                        task::spawn(monitor_position(client, to, token_addr, buy_amt, config));
-                        // 注意：买入成功后，我们不在此时移除 Lock。
-                        // 因为正在 Monitor 中，我们不希望同一个 Token 被再次买入。
-                        // 锁会在程序重启或逻辑重置时自然释放。
-                        // 如果你希望在 Monitor 结束后释放，需要将 cleanup 传进去，但这太复杂。
-                        // 对于 Sniper，一个 Session 买一次即可。
+            match execute_buy_and_approve(
+                client.clone(),
+                nonce_manager,
+                to,
+                *WETH_BASE,
+                token_addr,
+                buy_amt,
+                min_out,
+                &config,
+            )
+            .await
+            {
+                Ok(_) => {
+                    println!(">>> [PERSIST] Saving position to file...");
+                    let pos_data = PositionData {
+                        token_address: token_addr,
+                        router_address: to,
+                        initial_cost_eth: buy_amt,
+                        timestamp: Local::now().timestamp() as u64,
+                    };
+                    let _ = save_position(&pos_data);
+                    task::spawn(monitor_position(client, to, token_addr, buy_amt, config));
+                    // 注意：买入成功后，我们不在此时移除 Lock。
+                    // 因为正在 Monitor 中，我们不希望同一个 Token 被再次买入。
+                    // 锁会在程序重启或逻辑重置时自然释放。
+                    // 如果你希望在 Monitor 结束后释放，需要将 cleanup 传进去，但这太复杂。
+                    // 对于 Sniper，一个 Session 买一次即可。
 
-                        // 为了防止 Set 无限膨胀，我们可以选择不 Remove，或者设置 TTL。
-                        // 这里选择保留锁，直到程序重启。
-                    }
-                    Err(e) => {
-                        println!("   [Error] Buy Tx Failed: {:?}", e);
-                        cleanup(token_addr);
-                    }
+                    // 为了防止 Set 无限膨胀，我们可以选择不 Remove，或者设置 TTL。
+                    // 这里选择保留锁，直到程序重启。
+                }
+                Err(e) => {
+                    println!("   [Error] Buy Tx Failed: {:?}", e);
+                    cleanup(token_addr);
                 }
             }
         }
@@ -516,7 +532,7 @@ async fn main() -> anyhow::Result<()> {
     dotenv().ok();
     tracing_subscriber::fmt::init();
     let config = AppConfig::from_env();
-    
+
     println!("=== Base Sniper Pro (Optimized + Secure) ===");
     println!(
         "Mode: LIVE | Node: {}",

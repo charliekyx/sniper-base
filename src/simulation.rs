@@ -1,8 +1,7 @@
 use crate::constants::WETH_BASE;
 use anyhow::Result;
 use ethers::abi::parse_abi;
-use ethers::prelude::{BaseContract, Provider, Ws};
-use ethers::providers::Middleware;
+use ethers::prelude::{BaseContract, Provider, Ws, Middleware};
 use ethers::types::{Address, Transaction, U256};
 use revm::{
     db::{CacheDB, DatabaseRef, EthersDB},
@@ -16,11 +15,13 @@ use std::cell::RefCell;
 use std::str::FromStr;
 use std::sync::Arc;
 
+// Lightweight wrapper, cloneable and thread-safe
+#[derive(Clone)]
 pub struct Simulator {
     provider: Arc<Provider<Ws>>,
 }
 
-// Wrapper to make EthersDB (which is &mut) compatible with CacheDB (which needs DatabaseRef/&self)
+// Wrapper to make EthersDB compatible with CacheDB
 pub struct ForkDB {
     backend: RefCell<EthersDB<Provider<Ws>>>,
 }
@@ -49,7 +50,6 @@ impl DatabaseRef for ForkDB {
     }
 
     fn block_hash(&self, number: rU256) -> Result<rB256, Self::Error> {
-        // Pass U256 directly as required by the Database trait in this version of revm
         self.backend.borrow_mut().block_hash(number)
     }
 }
@@ -59,8 +59,9 @@ impl Simulator {
         Self { provider }
     }
 
+    // Removed &mut self, making it stateless and parallel-friendly
     pub async fn simulate_bundle(
-        &mut self,
+        &self,
         _target_tx: Option<Transaction>,
         router_addr: Address,
         amount_in_eth: U256,
@@ -94,7 +95,8 @@ impl Simulator {
 
         // 3. Setup simulation wallet
         let my_wallet = rAddress::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        let initial_eth = rU256::from(10000000000000000000u128); // 10 ETH
+        // 10 ETH
+        let initial_eth = rU256::from(10000000000000000000u128); 
 
         cache_db.insert_account_info(
             my_wallet,
@@ -232,8 +234,6 @@ impl Simulator {
         }
 
         // Step 5: Calculate final result
-        // Directly get from cache_db because evm.db is just a mutable reference to it
-        // Note: After transact_commit, the state is already written to cache_db
         let final_eth = cache_db
             .basic(my_wallet)
             .map_err(|_| anyhow::anyhow!("Failed to get balance"))?

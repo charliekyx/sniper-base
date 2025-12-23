@@ -1,10 +1,9 @@
 [package]
 name = "base_sniper"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 
 [dependencies]
-# 核心库
 ethers = { version = "2.0.14", features = ["ws", "rustls", "abigen", "ipc"] }
 ethers-core = "2.0.14"
 ethers-providers = "2.0.14"
@@ -16,5 +15,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 chrono = "0.4"
 lazy_static = "1.4"
-# 必须锁定 revm 版本以兼容 ethers
 revm = { version = "3.5.0", features = ["ethersdb", "std"] }
+rand = "0.8"
+
+# Optimization Profile for Release Build
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

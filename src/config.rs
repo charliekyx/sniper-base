@@ -6,22 +6,29 @@ use std::str::FromStr;
 #[derive(Deserialize, Debug, Clone)]
 pub struct AppConfig {
     pub rpc_url: String,
-    pub private_key: String,       // 必填：用于实战交易
+    pub private_key: String,
     pub sniper_enabled: bool,
     pub copy_trade_enabled: bool,
-    pub shadow_mode: bool,         // true = 模拟运行; false = 真钱交易
+    pub shadow_mode: bool,
     pub target_wallets: Vec<String>,
     
-    // --- 资金与 Gas ---
-    pub buy_amount_eth: f64,       // 单次狙击金额 (ETH)
-    pub gas_limit: u64,            // 交易 Gas 上限 (防死循环/高耗费)
-    pub max_priority_fee_gwei: u64,// 贿赂矿工的小费
+    // Node Configuration
+    // Set to true since you have a self-built node
+    pub use_private_node: bool, 
     
-    // --- 防御与策略 ---
-    pub sniper_block_delay: u64,   // 延迟 N 个区块买入 (防开盘黑名单陷阱)
-    pub sell_strategy_2x_exit_half: bool, // 翻倍出本 (卖 50%)
-    pub sell_strategy_3x_exit_all: bool,  // 3倍清仓 (卖 100%)
-    pub anti_rug_dip_threshold: u64,      // 跌幅止损阈值 (例如 50 表示跌 50% 跑路)
+    // Capital & Gas Strategy (Optimized for 500 SGD / ~0.11 ETH)
+    // Recommended: buy_amount_eth = 0.02 or 0.03
+    pub buy_amount_eth: f64,       
+    // Recommended: 300000 - 400000
+    pub gas_limit: u64,            
+    // Recommended: 2 - 5 Gwei (Keep it low to preserve capital)
+    pub max_priority_fee_gwei: u64,
+    
+    // Protection Strategy
+    pub sniper_block_delay: u64,
+    pub sell_strategy_2x_exit_half: bool,
+    pub sell_strategy_3x_exit_all: bool,
+    pub anti_rug_dip_threshold: u64,
 }
 
 impl AppConfig {

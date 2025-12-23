@@ -190,7 +190,7 @@ checksum = "0e050f626429857a27ddccb31e0aca21356bfa709c04041aefddac081a8f068a"
 
 [[package]]
 name = "base_sniper"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -198,6 +198,7 @@ dependencies = [
  "ethers-core",
  "ethers-providers",
  "lazy_static",
+ "rand 0.8.5",
  "revm",
  "serde",
  "serde_json",

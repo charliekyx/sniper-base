@@ -24,7 +24,7 @@ RUN mkdir src && \
 
 # 3. 编译依赖 (Release模式)
 # 这一步最慢，但会被缓存
-RUN cargo build --release
+RUN cargo update && cargo build --release
 
 # 4. 删除假的源码，复制真正的源码
 RUN rm -rf src

@@ -5,6 +5,7 @@ services:
     build: .
     container_name: base_sniper_bot
     restart: unless-stopped  # 如果程序崩溃或重启服务器，自动重启
+    network_mode: "host"
     volumes:
       # 1. 挂载配置文件 (本地改了重启容器即生效)
       - ./.env:/app/.env

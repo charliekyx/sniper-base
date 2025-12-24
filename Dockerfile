@@ -1,6 +1,6 @@
 # --- 第一阶段：构建环境 (Builder) ---
 # 使用 latest 以避免 lock file 版本问题
-FROM rust:latest as builder
+FROM rust:1.76-bullseye as builder
 
 # 设置工作目录
 WORKDIR /usr/src/app
@@ -24,7 +24,7 @@ RUN mkdir src && \
 
 # 3. 编译依赖 (Release模式)
 # 这一步最慢，但会被缓存
-RUN cargo update && cargo build --release
+RUN cargo build --release
 
 # 4. 删除假的源码，复制真正的源码
 RUN rm -rf src
@@ -34,7 +34,7 @@ COPY src ./src
 RUN touch src/main.rs && cargo build --release
 
 # --- 第二阶段：运行环境 (Runner) ---
-FROM debian:bookworm-slim
+FROM debian:bullseye-slim
 
 WORKDIR /app
 

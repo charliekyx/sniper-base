@@ -15,6 +15,7 @@ use chrono::Local;
 use dotenv::dotenv;
 use ethers::abi::parse_abi;
 use ethers::prelude::*;
+use ethers::providers::Ipc;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -108,7 +109,7 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
 // --- Execution Core ---
 
 async fn execute_buy_and_approve(
-    client: Arc<SignerMiddleware<Provider<Ws>, LocalWallet>>,
+    client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     nonce_manager: Arc<NonceManager>,
     router_addr: Address,
     token_in: Address,
@@ -204,7 +205,7 @@ async fn execute_buy_and_approve(
 
 // Smart Sell Logic
 async fn execute_smart_sell(
-    client: Arc<SignerMiddleware<Provider<Ws>, LocalWallet>>,
+    client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     router_addr: Address,
     token_in: Address,
     token_out: Address,
@@ -268,7 +269,7 @@ async fn execute_smart_sell(
 }
 
 async fn monitor_position(
-    client: Arc<SignerMiddleware<Provider<Ws>, LocalWallet>>,
+    client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     router_addr: Address,
     token_addr: Address,
     initial_cost_eth: U256,
@@ -381,8 +382,8 @@ async fn monitor_position(
 
 async fn process_transaction(
     tx: Transaction,
-    provider: Arc<Provider<Ws>>,
-    client: Arc<SignerMiddleware<Provider<Ws>, LocalWallet>>,
+    provider: Arc<Provider<Ipc>>,
+    client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     nonce_manager: Arc<NonceManager>,
     simulator: Simulator,
     config: AppConfig,
@@ -545,7 +546,9 @@ async fn main() -> anyhow::Result<()> {
 
     init_storage();
 
-    let provider = Provider::<Ws>::connect(&config.rpc_url).await?;
+    let ipc_path = "/app/geth_data/geth.ipc";
+    let provider = Provider::<Ipc>::connect_ipc(ipc_path).await?;
+
     let chain_id = provider.get_chainid().await?.as_u64();
 
     let wallet = if !config.private_key.is_empty() {

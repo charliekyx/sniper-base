@@ -1,7 +1,8 @@
 use crate::constants::WETH_BASE;
 use anyhow::Result;
 use ethers::abi::parse_abi;
-use ethers::prelude::{BaseContract, Provider, Ws, Middleware};
+// [修改] 引入 Ipc，去掉 Ws
+use ethers::prelude::{BaseContract, Provider, Ipc, Middleware}; 
 use ethers::types::{Address, Transaction, U256};
 use revm::{
     db::{CacheDB, DatabaseRef, EthersDB},
@@ -16,15 +17,18 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Simulator {
-    provider: Arc<Provider<Ws>>,
+    // [修改] 类型改为 Ipc
+    provider: Arc<Provider<Ipc>>, 
 }
 
 pub struct ForkDB {
-    backend: RefCell<EthersDB<Provider<Ws>>>,
+    // [修改] 类型改为 Ipc
+    backend: RefCell<EthersDB<Provider<Ipc>>>, 
 }
 
 impl ForkDB {
-    pub fn new(backend: EthersDB<Provider<Ws>>) -> Self {
+    // [修改] 类型改为 Ipc
+    pub fn new(backend: EthersDB<Provider<Ipc>>) -> Self {
         Self {
             backend: RefCell::new(backend),
         }
@@ -32,7 +36,8 @@ impl ForkDB {
 }
 
 impl DatabaseRef for ForkDB {
-    type Error = <EthersDB<Provider<Ws>> as Database>::Error;
+    // [修改] 类型改为 Ipc
+    type Error = <EthersDB<Provider<Ipc>> as Database>::Error;
 
     fn basic(&self, address: rAddress) -> Result<Option<AccountInfo>, Self::Error> {
         self.backend.borrow_mut().basic(address)
@@ -52,14 +57,14 @@ impl DatabaseRef for ForkDB {
 }
 
 impl Simulator {
-    pub fn new(provider: Arc<Provider<Ws>>) -> Self {
+    // [修改] 类型改为 Ipc
+    pub fn new(provider: Arc<Provider<Ipc>>) -> Self {
         Self { provider }
     }
 
-    // 更新：增加 origin 参数，模拟真实身份
     pub async fn simulate_bundle(
         &self,
-        origin: Address, // 你的钱包地址
+        origin: Address,
         _target_tx: Option<Transaction>,
         router_addr: Address,
         amount_in_eth: U256,
@@ -67,6 +72,7 @@ impl Simulator {
     ) -> Result<(bool, U256, U256, String)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
 
+        // [修改] EthersDB 也要适配 Ipc
         let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
             .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
 
@@ -88,10 +94,7 @@ impl Simulator {
         let revm_router = rAddress::from(router_addr.0);
         let revm_token = rAddress::from(token_out.0);
         
-        // 使用你的真实地址作为模拟发起人
         let my_wallet = rAddress::from(origin.0);
-        
-        // 赋予初始资金 (100 ETH) 用于模拟
         let initial_eth = rU256::from(100000000000000000000u128); 
 
         cache_db.insert_account_info(
@@ -112,7 +115,6 @@ impl Simulator {
         evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(block_number + 1);
 
-        // Step 0: Get Expected Tokens
         let path = vec![*WETH_BASE, token_out];
         let amounts_out_calldata = router.encode("getAmountsOut", (amount_in_eth, path.clone()))?;
 
@@ -135,7 +137,6 @@ impl Simulator {
             _ => return Ok((false, U256::zero(), U256::zero(), "GetAmountsOut Failed".to_string())),
         };
 
-        // Step 1: Buy
         let deadline = U256::from(9999999999u64);
         let buy_calldata = router.encode(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
@@ -157,7 +158,6 @@ impl Simulator {
             return Ok((false, U256::zero(), U256::zero(), "Buy Reverted".to_string()));
         }
 
-        // Step 2: Check Balance
         let balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
         evm.env.tx.transact_to = TransactTo::Call(revm_token);
         evm.env.tx.data = balance_calldata.0.into();
@@ -176,13 +176,11 @@ impl Simulator {
             return Ok((false, U256::zero(), expected_tokens, format!("High Buy Tax! Exp: {} Got: {}", expected_tokens, token_balance)));
         }
 
-        // Step 3: Approve
         let approve_calldata = token.encode("approve", (router_addr, U256::MAX))?;
         evm.env.tx.transact_to = TransactTo::Call(revm_token);
         evm.env.tx.data = approve_calldata.0.into();
         evm.transact_commit().ok();
 
-        // Step 4: Sell
         let sell_path = vec![token_out, *WETH_BASE];
         let sell_calldata = router.encode(
             "swapExactTokensForETHSupportingFeeOnTransferTokens",

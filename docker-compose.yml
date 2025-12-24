@@ -11,9 +11,11 @@ services:
       - ./.env:/app/.env
       # 2. 挂载数据文件 (确保 shadow 模式的数据写在宿主机上，不会丢失)
       - ./shadow_trades.jsonl:/app/shadow_trades.jsonl
+      - ./data/geth:/app/geth_data
     environment:
       # 可以在这里覆盖环境变量，例如日志级别
       - RUST_LOG=info
+      - IPC_PATH=/app/geth_data/geth.ipc
     # 限制日志文件大小，防止撑爆服务器硬盘
     logging:
       driver: "json-file"

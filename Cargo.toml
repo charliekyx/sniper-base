@@ -22,6 +22,7 @@ revm = { version = "3.5.0", features = ["ethersdb", "std"] }
 rand = "0.8"
 # 新增：用于加载 .env 文件
 dotenv = "0.15"
+home = "=0.5.9"
 
 [profile.release]
 opt-level = 3

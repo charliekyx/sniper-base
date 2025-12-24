@@ -622,6 +622,14 @@ async fn main() -> anyhow::Result<()> {
     let mut debug_heartbeat = 0; // [新增]
 
     while let Some(block) = stream.next().await {
+        debug_heartbeat += 1;
+        if debug_heartbeat % 10 == 0 {
+            // 每 10 个块打印一次，让你知道它还活着
+            if let Some(h) = block.hash {
+                println!(">>> [HEARTBEAT] Still scanning... Latest Block: {:?}", h);
+            }
+        }
+
         let provider = provider_arc.clone();
         let sender = tx_sender.clone();
 

@@ -619,7 +619,15 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let mut debug_heartbeat = 0; // [新增]
+
     while let Some(tx_hash) = stream.next().await {
+        debug_heartbeat += 1;
+        if debug_heartbeat % 100 == 0 {
+            let timestamp = chrono::Local::now().format("%H:%M:%S");
+            println!(">>> [心跳 {}] 正在扫描... 已处理 {} 笔交易", timestamp, debug_heartbeat);
+        }
+        
         let provider = provider_arc.clone();
         let sender = tx_sender.clone();
         task::spawn(async move {

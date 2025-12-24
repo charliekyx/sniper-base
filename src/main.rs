@@ -594,7 +594,7 @@ async fn main() -> anyhow::Result<()> {
     let processing_locks = Arc::new(Mutex::new(HashSet::new()));
 
     let (tx_sender, mut rx_receiver) = mpsc::channel::<Transaction>(10000);
-    let mut stream = provider_arc.subscribe_pending_txs().await?;
+    let mut stream = provider_arc.subscribe_blocks().await?;
 
     let p_clone = provider_arc.clone();
     let c_clone = client.clone();
@@ -621,18 +621,36 @@ async fn main() -> anyhow::Result<()> {
 
     let mut debug_heartbeat = 0; // [新增]
 
-    while let Some(tx_hash) = stream.next().await {
-        debug_heartbeat += 1;
-        if debug_heartbeat % 100 == 0 {
-            let timestamp = chrono::Local::now().format("%H:%M:%S");
-            println!(">>> [心跳 {}] 正在扫描... 已处理 {} 笔交易", timestamp, debug_heartbeat);
-        }
-        
+    while let Some(block) = stream.next().await {
         let provider = provider_arc.clone();
         let sender = tx_sender.clone();
+
+        // 使用 spawn 立即释放主循环，去处理下一个可能的事件
         task::spawn(async move {
-            if let Ok(Some(tx)) = provider.get_transaction(tx_hash).await {
-                let _ = sender.send(tx).await;
+            if let Some(hash) = block.hash {
+                // 性能优化：不要在这里 println，或者用 tracing::debug
+                // println!(">>> [NEW BLOCK] Scanned Block: {:?}", hash);
+
+                // 关键点：这里会有一次 RTT，但在没有 Pending 流的情况下是无法避免的
+                // 确保你的 op-geth 和 bot 在同一台机器或同一个内网，以消除网络延迟
+                match provider.get_block_with_txs(hash).await {
+                    Ok(Some(full_block)) => {
+                        // 收到区块后，立即并行处理所有交易
+                        for tx in full_block.transactions {
+                            // 直接发送到处理通道
+                            // 注意：这里的 tx 已经是 "Mined" 状态
+                            if let Err(e) = sender.send(tx).await {
+                                eprintln!("Channel error: {:?}", e);
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        // 区块可能还没同步完（虽然很少见），忽略
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch full block {:?}: {:?}", hash, e);
+                    }
+                }
             }
         });
     }

@@ -1,19 +1,20 @@
 # Stage 1: Prepare cargo-chef
-FROM rust:1.83-bookworm as chef
-RUN cargo install cargo-chef
+FROM rust:1.83-bookworm AS chef
+# [Fix] Add --locked to use the tested dependencies found in Cargo.lock
+# avoiding the broken globset 0.4.18 update
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
 # Stage 2: Compute dependency recipe
-FROM chef as planner
+FROM chef AS planner
 COPY . .
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Stage 3: Build dependencies and application
-FROM chef as builder
+FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
 
 # Install build dependencies
-# We use standard clang and lld. Usually sufficient for ethers/revm bindgen.
 RUN apt-get update && apt-get install -y \
     clang \
     lld \

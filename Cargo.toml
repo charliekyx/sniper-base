@@ -24,6 +24,7 @@ rand = "0.8"
 dotenv = "0.15"
 home = "=0.5.9"
 ruint = "=1.16.0"
+base64ct = "=1.6.0"
 
 [profile.release]
 opt-level = 3

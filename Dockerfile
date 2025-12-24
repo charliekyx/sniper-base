@@ -1,12 +1,10 @@
 # --- 第一阶段：构建环境 (Builder) ---
-# 使用明确的 rust:1.83-bookworm 镜像，确保基础系统是 Debian 12
-FROM rust:1.83-bookworm as builder
+FROM rust:latest as builder
 
 WORKDIR /usr/src/app
 
-# 1. [核弹级修复] 强制安装 Clang 16 和相关工具
-# 我们不使用默认的 'clang'，而是指定 'clang-16'，避免版本混淆
-# 同时安装 lld (更快的链接器) 和 llvm-16
+# 1. 安装 Clang 16 (解决 c-kzg 编译问题)
+# 这一步是必须的，否则 c-kzg 会报 unresolved imports
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
@@ -16,28 +14,29 @@ RUN apt-get update && apt-get install -y \
     lld \
     && rm -rf /var/lib/apt/lists/*
 
-# 2. [关键] 设置确定的环境变量
-# 直接硬编码路径，不让 bindgen 猜
-ENV CC=clang-16
-ENV CXX=clang++-16
-ENV LIBCLANG_PATH=/usr/lib/llvm-16/lib
-ENV LLVM_CONFIG_PATH=/usr/bin/llvm-config-16
+# 设置环境变量确保 bindgen 找到 clang
+ENV CC=clang-16 CXX=clang++-16 LIBCLANG_PATH=/usr/lib/llvm-16/lib
 
-# 3. [双重保险] 手动创建 bindgen 需要的 symlink
-# bindgen 有时候只认 libclang.so，不认 .so.1
-RUN ln -s /usr/lib/llvm-16/lib/libclang.so.1 /usr/lib/llvm-16/lib/libclang.so || true
+# 2. [核心修复] 只复制 Cargo.toml，不复制 Cargo.lock
+# 我们不要用你本地那个“太超前”的锁文件
+COPY Cargo.toml ./
 
-# 4. 复制依赖文件 (确保 .dockerignore 没把 Cargo.lock 忽略掉！)
-COPY Cargo.toml Cargo.lock ./
+# 3. [核心修复] 生成新锁文件并强制降级不兼容的库
+# base64ct 1.8.1 -> 1.6.0 (解决 edition2024 报错)
+# ruint 1.17.0 -> 1.16.0 (解决 edition2024 报错)
+# home 0.5.12 -> 0.5.9 (解决 edition2024 报错)
+RUN cargo generate-lockfile && \
+    cargo update -p base64ct --precise 1.6.0 && \
+    cargo update -p ruint --precise 1.16.0 && \
+    cargo update -p home --precise 0.5.9
 
-# 5. 预编译依赖
+# 4. 预编译依赖
 RUN mkdir src && \
     echo "fn main() {println!(\"if you see this, the build broke\")}" > src/main.rs
 
-# 6. 编译依赖 (Release模式)
 RUN cargo build --release
 
-# 7. 编译正式项目
+# 5. 编译正式项目
 RUN rm -rf src
 COPY src ./src
 # 更新时间戳触发重编
@@ -47,14 +46,7 @@ RUN touch src/main.rs && cargo build --release
 FROM debian:bookworm-slim
 
 WORKDIR /app
-
-# 安装运行时依赖 (保持与 builder 一致的系统库版本)
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# 复制二进制
+RUN apt-get update && apt-get install -y ca-certificates libssl-dev && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /usr/src/app/target/release/base_sniper .
 RUN chmod +x base_sniper
 

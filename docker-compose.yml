@@ -1,16 +1,15 @@
-version: '3.8'
-
 services:
   sniper:
     build: .
     container_name: base_sniper_bot
-    restart: unless-stopped  # 如果程序崩溃或重启服务器，自动重启
+    restart: unless-stopped # 如果程序崩溃或重启服务器，自动重启
     network_mode: "host"
     volumes:
       # 1. 挂载配置文件 (本地改了重启容器即生效)
       - ./.env:/app/.env
       # 2. 挂载数据文件 (确保 shadow 模式的数据写在宿主机上，不会丢失)
-      - ./shadow_trades.jsonl:/app/shadow_trades.jsonl
+      - ./shadow_trades.csv:/app/shadow_trades.csv
+      - ./shadow_results.csv:/app/shadow_results.csv
       - /home/ubuntu/node/data/geth:/app/geth_data
     environment:
       # 可以在这里覆盖环境变量，例如日志级别

@@ -564,7 +564,12 @@ async fn main() -> anyhow::Result<()> {
 
     println!("=== Base Sniper Pro (Optimized + Secure) ===");
     println!(
-        "Mode: LIVE | Node: {}",
+        "Mode: {} | Node: {}",
+        if config.shadow_mode {
+            "SHADOW (Simulation Only)"
+        } else {
+            "LIVE (Real Trading)"
+        },
         if config.use_private_node {
             "PRIVATE"
         } else {

@@ -274,6 +274,7 @@ async fn monitor_position(
     token_addr: Address,
     initial_cost_eth: U256,
     config: AppConfig,
+    processing_locks: Arc<Mutex<HashSet<Address>>>,
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
     // 修复：使用 expect/match 替代 unwrap，防止 panic
@@ -315,6 +316,10 @@ async fn monitor_position(
                 "*** [MONITOR] Balance is 0 for {:?}. Removing persistence.",
                 token_addr
             );
+            // 释放锁，允许再次买入
+            if let Ok(mut locks) = processing_locks.lock() {
+                locks.remove(&token_addr);
+            }
             remove_position(token_addr);
             break;
         }
@@ -369,6 +374,10 @@ async fn monitor_position(
                     ethers::utils::format_units(current_val, "ether").unwrap(),
                     is_panic,
                 );
+                // 影子模式卖出后释放锁
+                if let Ok(mut locks) = processing_locks.lock() {
+                    locks.remove(&token_addr);
+                }
                 break;
             } else {
                 // 实盘模式：执行真实卖出
@@ -382,6 +391,10 @@ async fn monitor_position(
                     is_panic,
                 )
                 .await;
+                // 实盘卖出后释放锁
+                if let Ok(mut locks) = processing_locks.lock() {
+                    locks.remove(&token_addr);
+                }
             }
 
             if !sold_half || is_panic {
@@ -458,8 +471,13 @@ async fn process_transaction(
                 .simulate_bundle(client.address(), None, to, buy_amt, token_addr)
                 .await;
 
-            let (sim_ok, profit_wei, expected_tokens, reason) =
-                sim_res.unwrap_or((false, U256::zero(), U256::zero(), "Sim Error".to_string()));
+            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = sim_res.unwrap_or((
+                false,
+                U256::zero(),
+                U256::zero(),
+                "Sim Error".to_string(),
+                0,
+            ));
 
             if config.shadow_mode {
                 println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
@@ -480,7 +498,7 @@ async fn process_transaction(
                     amount_in_eth: config.buy_amount_eth.to_string(),
                     simulation_result: reason.clone(),
                     profit_eth_after_sell: profit_eth,
-                    gas_used: 0,
+                    gas_used,
                     copy_target: if is_target_buy {
                         Some(format!("{:?}", tx.from))
                     } else {
@@ -497,6 +515,7 @@ async fn process_transaction(
                         token_addr,
                         buy_amt,
                         config.clone(),
+                        processing_locks.clone(),
                     ));
                 } else {
                     // 修复：如果模拟失败，立即释放锁，以便下次机会
@@ -537,15 +556,14 @@ async fn process_transaction(
                         timestamp: Local::now().timestamp() as u64,
                     };
                     let _ = save_position(&pos_data);
-                    task::spawn(monitor_position(client, to, token_addr, buy_amt, config));
-                    // 注意：买入成功后，我们不在此时移除 Lock。
-                    // 因为正在 Monitor 中，我们不希望同一个 Token 被再次买入。
-                    // 锁会在程序重启或逻辑重置时自然释放。
-                    // 如果你希望在 Monitor 结束后释放，需要将 cleanup 传进去，但这太复杂。
-                    // 对于 Sniper，一个 Session 买一次即可。
-
-                    // 为了防止 Set 无限膨胀，我们可以选择不 Remove，或者设置 TTL。
-                    // 这里选择保留锁，直到程序重启。
+                    task::spawn(monitor_position(
+                        client,
+                        to,
+                        token_addr,
+                        buy_amt,
+                        config,
+                        processing_locks.clone(),
+                    ));
                 }
                 Err(e) => {
                     println!("   [Error] Buy Tx Failed: {:?}", e);
@@ -579,6 +597,9 @@ async fn main() -> anyhow::Result<()> {
 
     init_storage();
 
+    // 修复：初始化重复购买锁（必须在恢复持仓和启动监控之前）
+    let processing_locks = Arc::new(Mutex::new(HashSet::new()));
+
     // 修复：使用配置中的 RPC_URL (IPC 路径)
     let provider = Provider::<Ipc>::connect_ipc(&config.rpc_url).await?;
 
@@ -606,6 +627,11 @@ async fn main() -> anyhow::Result<()> {
             existing_positions.len()
         );
         for pos in existing_positions {
+            // 恢复时也将 Token 加入锁，防止重复买入
+            {
+                let mut locks = processing_locks.lock().unwrap();
+                locks.insert(pos.token_address);
+            }
             println!("   -> Resuming monitor for {:?}", pos.token_address);
             let c = client.clone();
             let cfg = config.clone();
@@ -615,6 +641,7 @@ async fn main() -> anyhow::Result<()> {
                 pos.token_address,
                 pos.initial_cost_eth,
                 cfg,
+                processing_locks.clone(),
             ));
         }
     }
@@ -625,9 +652,6 @@ async fn main() -> anyhow::Result<()> {
         .as_u64();
     let nonce_manager = Arc::new(NonceManager::new(start_nonce));
     println!(">>> Initialized Nonce: {}", start_nonce);
-
-    // 修复：初始化重复购买锁
-    let processing_locks = Arc::new(Mutex::new(HashSet::new()));
 
     let (tx_sender, mut rx_receiver) = mpsc::channel::<Transaction>(10000);
     let mut stream = provider_arc.subscribe_blocks().await?;

@@ -1,3 +1,4 @@
+use chrono;
 use serde::Serialize;
 use std::fs::OpenOptions;
 use std::path::Path;
@@ -5,9 +6,9 @@ use std::path::Path;
 #[derive(Debug, Serialize)]
 pub struct ShadowRecord {
     pub timestamp: String,
-    pub event_type: String,     // e.g., "Buy_ETH->Token"
-    pub router: String,         // e.g., "BaseSwap"
-    pub trigger_hash: String,   // Tx Hash that triggered the sniper
+    pub event_type: String,   // e.g., "Buy_ETH->Token"
+    pub router: String,       // e.g., "BaseSwap"
+    pub trigger_hash: String, // Tx Hash that triggered the sniper
     pub token_address: String,
     pub amount_in_eth: String,
     pub simulation_result: String, // e.g., "Profitable", "Honeypot"
@@ -18,21 +19,16 @@ pub struct ShadowRecord {
 
 pub fn log_shadow_trade(record: ShadowRecord) {
     // Print to console for real-time monitoring
-    println!("[SHADOW] {} | {} | {} | Res: {}", 
-        record.timestamp, 
-        record.event_type, 
-        record.token_address, 
-        record.simulation_result
+    println!(
+        "[SHADOW] {} | {} | {} | Res: {}",
+        record.timestamp, record.event_type, record.token_address, record.simulation_result
     );
 
     // Save to CSV for analysis
     let file_path = "shadow_trades.csv";
     let file_exists = Path::new(file_path).exists();
 
-    let file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(file_path);
+    let file = OpenOptions::new().create(true).append(true).open(file_path);
 
     match file {
         Ok(f) => {
@@ -43,7 +39,7 @@ pub fn log_shadow_trade(record: ShadowRecord) {
             if let Err(e) = wtr.serialize(&record) {
                 eprintln!("[LOGGER ERROR] Failed to serialize record: {:?}", e);
             }
-            
+
             if let Err(e) = wtr.flush() {
                 eprintln!("[LOGGER ERROR] Failed to flush CSV writer: {:?}", e);
             }
@@ -51,5 +47,39 @@ pub fn log_shadow_trade(record: ShadowRecord) {
         Err(e) => {
             eprintln!("[LOGGER ERROR] Failed to open shadow_trades.csv: {:?}", e);
         }
+    }
+}
+
+pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, is_panic: bool) {
+    let initial: f64 = initial_eth.parse().unwrap_or(0.0);
+    let final_val: f64 = final_eth.parse().unwrap_or(0.0);
+    let profit = final_val - initial;
+    let roi = if initial > 0.0 {
+        (profit / initial) * 100.0
+    } else {
+        0.0
+    };
+
+    println!(
+        "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Panic: {}",
+        token, profit, roi, is_panic
+    );
+
+    // 简单追加到另一个文件方便统计
+    let file_path = "shadow_results.csv";
+    let file_exists = std::path::Path::new(file_path).exists();
+    if let Ok(f) = OpenOptions::new().create(true).append(true).open(file_path) {
+        let mut wtr = csv::WriterBuilder::new()
+            .has_headers(!file_exists)
+            .from_writer(f);
+        let _ = wtr.write_record(&[
+            chrono::Local::now().to_rfc3339(),
+            token,
+            initial_eth,
+            final_eth,
+            profit.to_string(),
+            format!("{:.2}%", roi),
+        ]);
+        let _ = wtr.flush();
     }
 }

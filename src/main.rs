@@ -361,16 +361,29 @@ async fn monitor_position(
         }
 
         if trigger_sell {
-            let _ = execute_smart_sell(
-                client.clone(),
-                router_addr,
-                token_addr,
-                *WETH_BASE,
-                sell_amount,
-                &config,
-                is_panic,
-            )
-            .await;
+            if config.shadow_mode {
+                // 影子模式：记录数据并退出监控
+                crate::logger::log_shadow_sell(
+                    format!("{:?}", token_addr),
+                    ethers::utils::format_units(initial_cost_eth, "ether").unwrap(),
+                    ethers::utils::format_units(current_val, "ether").unwrap(),
+                    is_panic,
+                );
+                break;
+            } else {
+                // 实盘模式：执行真实卖出
+                let _ = execute_smart_sell(
+                    client.clone(),
+                    router_addr,
+                    token_addr,
+                    *WETH_BASE,
+                    sell_amount,
+                    &config,
+                    is_panic,
+                )
+                .await;
+            }
+
             if !sold_half || is_panic {
                 sleep(Duration::from_secs(5)).await;
             }
@@ -417,8 +430,9 @@ async fn process_transaction(
                 }
             };
 
+            // 修复：匹配 decode_router_input 返回的动作名称
             let is_target_buy =
-                config.copy_trade_enabled && targets.contains(&tx.from) && action == "Swap";
+                config.copy_trade_enabled && targets.contains(&tx.from) && action.contains("Buy");
             let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
 
             if !is_target_buy && !is_new_liquidity {
@@ -474,8 +488,22 @@ async fn process_transaction(
                     },
                 });
 
-                // In shadow mode, we stop here regardless of result to prevent real buying
-                cleanup(token_addr);
+                // 改进：如果你想在 Shadow Mode 测试卖出逻辑，可以模拟启动监控
+                if sim_ok {
+                    println!("   [Shadow] Starting virtual monitor for {:?}", token_addr);
+                    task::spawn(monitor_position(
+                        client.clone(),
+                        to,
+                        token_addr,
+                        buy_amt,
+                        config.clone(),
+                    ));
+                } else {
+                    // 修复：如果模拟失败，立即释放锁，以便下次机会
+                    cleanup(token_addr);
+                }
+
+                // 影子模式下直接返回，不进入实盘逻辑
                 return;
             }
 
@@ -546,8 +574,8 @@ async fn main() -> anyhow::Result<()> {
 
     init_storage();
 
-    let ipc_path = "/app/geth_data/geth.ipc";
-    let provider = Provider::<Ipc>::connect_ipc(ipc_path).await?;
+    // 修复：使用配置中的 RPC_URL (IPC 路径)
+    let provider = Provider::<Ipc>::connect_ipc(&config.rpc_url).await?;
 
     let chain_id = provider.get_chainid().await?.as_u64();
 

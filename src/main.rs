@@ -102,6 +102,40 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         return get_path_token(2, true).map(|t| ("Swap_Token->Token".to_string(), t));
     } else if sig == [0xf3, 0x05, 0xd7, 0x19] {
         return read_address(4).map(|t| ("AddLiquidity".to_string(), t));
+    } else if sig == [0xd1, 0xee, 0x21, 0x1d] || sig == [0x0f, 0x27, 0xc5, 0xc1] {
+        // Odos Router: swap / swapCompact
+        // 参数结构: (bytes pathDefinition, ...)
+        // pathDefinition 是紧凑字节: [TokenIn(20)] [Fee(3)] [TokenOut(20)]
+        let offset_ptr = 4; // 第一个参数的 offset
+        let path_offset = read_usize(offset_ptr)?;
+        let len_ptr = 4 + path_offset;
+        let path_len = read_usize(len_ptr)?;
+
+        // 最短路径: In(20) + Fee(3) + Out(20) = 43 字节
+        if path_len < 43 {
+            return None;
+        }
+
+        let path_start = len_ptr + 32;
+        if path_start + path_len > input.len() {
+            return None;
+        }
+
+        let path_bytes = &input[path_start..path_start + path_len];
+        let token_in = Address::from_slice(&path_bytes[0..20]);
+        let token_out = Address::from_slice(&path_bytes[path_len - 20..path_len]);
+
+        if token_in == *WETH_BASE || token_in == Address::zero() {
+            return Some(("Buy_Odos".to_string(), token_out));
+        } else {
+            // 如果不是用 ETH 买，可能是 USDC->Token (视为 Swap) 或者 Token->ETH (视为 Sell)
+            // 这里简化处理：只要输出不是 ETH，就认为是买入/兑换目标 Token
+            if token_out != *WETH_BASE && token_out != Address::zero() {
+                return Some(("Swap_Odos".to_string(), token_out));
+            }
+            // 如果输出是 ETH，那就是卖出，返回输入 Token
+            return Some(("Sell_Odos".to_string(), token_in));
+        }
     }
     None
 }
@@ -483,7 +517,7 @@ async fn process_transaction(
             // 允许 Swap_Token->Token，因为很多高手用 USDC/WETH 买入
             let is_target_buy = config.copy_trade_enabled
                 && is_from_target
-                && (action.contains("Buy") || action == "Swap_Token->Token");
+                && (action.contains("Buy") || action.contains("Swap"));
             let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
 
             if !is_target_buy && !is_new_liquidity {

@@ -10,6 +10,7 @@ services:
       # 2. 挂载数据文件 (确保 shadow 模式的数据写在宿主机上，不会丢失)
       - ./shadow_trades.csv:/app/shadow_trades.csv
       - ./shadow_results.csv:/app/shadow_results.csv
+      - ./app.log:/app/app.log
       - /home/ubuntu/node/data/geth:/app/geth_data
     environment:
       # 可以在这里覆盖环境变量，例如日志级别

@@ -6,7 +6,7 @@ mod simulation;
 
 use crate::config::AppConfig;
 use crate::constants::{get_router_name, WETH_BASE};
-use crate::logger::{log_shadow_trade, ShadowRecord};
+use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
     init_storage, load_all_positions, remove_position, save_position, PositionData,
 };
@@ -417,12 +417,32 @@ async fn process_transaction(
     processing_locks: Arc<Mutex<HashSet<Address>>>, // 新增：重复锁
 ) {
     if let Some(to) = tx.to {
-        let router_name = get_router_name(&to);
-        if router_name == "Unknown" {
-            return;
+        // 1. 只要是目标钱包的交易，先打日志，防止“静默失效”
+        let is_from_target = targets.contains(&tx.from);
+        if is_from_target {
+            let msg = format!("[ACTIVITY] Target wallet {:?} sent tx to {:?}", tx.from, to);
+            println!("{}", msg);
+            log_to_file(msg);
         }
 
+        let router_name = get_router_name(&to);
+
         if let Some((action, token_addr)) = decode_router_input(&tx.input) {
+            if is_from_target && router_name == "Unknown" {
+                println!(
+                    "   [DEBUG] Target interacted with unknown router/contract: {:?}",
+                    to
+                );
+                log_to_file(format!(
+                    "   [DEBUG] Target interacted with unknown router/contract: {:?}",
+                    to
+                ));
+            }
+
+            if router_name == "Unknown" && action != "AddLiquidity" {
+                return;
+            }
+
             // 修复：双重购买保护
             // 检查该 Token 是否正在被处理，如果是，直接跳过
             {
@@ -444,8 +464,10 @@ async fn process_transaction(
             };
 
             // 修复：匹配 decode_router_input 返回的动作名称
-            let is_target_buy =
-                config.copy_trade_enabled && targets.contains(&tx.from) && action.contains("Buy");
+            // 允许 Swap_Token->Token，因为很多高手用 USDC/WETH 买入
+            let is_target_buy = config.copy_trade_enabled
+                && is_from_target
+                && (action.contains("Buy") || action == "Swap_Token->Token");
             let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
 
             if !is_target_buy && !is_new_liquidity {
@@ -453,7 +475,15 @@ async fn process_transaction(
                 return;
             }
 
-            println!("\n Trigger: {} | Token: {:?}", action, token_addr);
+            // 过滤掉卖出 WETH 的行为（比如 Token -> WETH 也会被识别为 Swap）
+            if token_addr == *WETH_BASE {
+                cleanup(token_addr);
+                return;
+            }
+
+            let trigger_msg = format!("Trigger: {} | Token: {:?}", action, token_addr);
+            println!("\n {}", trigger_msg);
+            log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 
             if config.sniper_block_delay > 0 && !config.shadow_mode {
@@ -481,6 +511,10 @@ async fn process_transaction(
 
             if config.shadow_mode {
                 println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
+                log_to_file(format!(
+                    "[Shadow] Sim Result: {} | Reason: {} | Token: {:?}",
+                    sim_ok, reason, token_addr
+                ));
 
                 // Use 'profit_wei' directly (it is a U256 value, not a reference, so no '*' needed)
                 let profit_eth = if sim_ok {
@@ -529,6 +563,10 @@ async fn process_transaction(
             // Real Trading Logic (Only reached if shadow_mode is false)
             if !sim_ok {
                 println!("   [ABORT] Simulation failed: {}. Likely Honeypot.", reason);
+                log_to_file(format!(
+                    "[ABORT] Sim failed: {} | Token: {:?}",
+                    reason, token_addr
+                ));
                 cleanup(token_addr);
                 return;
             }
@@ -549,6 +587,10 @@ async fn process_transaction(
             {
                 Ok(_) => {
                     println!(">>> [PERSIST] Saving position to file...");
+                    log_to_file(format!(
+                        ">>> [LIVE] Buy Confirmed & Position Saved: {:?}",
+                        token_addr
+                    ));
                     let pos_data = PositionData {
                         token_address: token_addr,
                         router_address: to,
@@ -686,7 +728,9 @@ async fn main() -> anyhow::Result<()> {
         if debug_heartbeat % 10 == 0 {
             // 每 10 个块打印一次，让你知道它还活着
             if let Some(h) = block.hash {
-                println!(">>> [HEARTBEAT] Still scanning... Latest Block: {:?}", h);
+                let hb_msg = format!("[HEARTBEAT] Still scanning... Latest Block: {:?}", h);
+                println!(">>> {}", hb_msg);
+                log_to_file(hb_msg);
             }
         }
 

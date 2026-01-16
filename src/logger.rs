@@ -1,6 +1,7 @@
 use chrono;
 use serde::Serialize;
 use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 #[derive(Debug, Serialize)]
@@ -17,12 +18,26 @@ pub struct ShadowRecord {
     pub copy_target: Option<String>,
 }
 
+pub fn log_to_file(msg: String) {
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let log_line = format!("[{}] {}\n", timestamp, msg);
+
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("app.log") {
+        let _ = file.write_all(log_line.as_bytes());
+    }
+}
+
 pub fn log_shadow_trade(record: ShadowRecord) {
     // Print to console for real-time monitoring
     println!(
         "[SHADOW] {} | {} | {} | Res: {}",
         record.timestamp, record.event_type, record.token_address, record.simulation_result
     );
+
+    log_to_file(format!(
+        "[SHADOW] {} | {} | Res: {}",
+        record.event_type, record.token_address, record.simulation_result
+    ));
 
     // Save to CSV for analysis
     let file_path = "shadow_trades.csv";
@@ -64,6 +79,11 @@ pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, is
         "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Panic: {}",
         token, profit, roi, is_panic
     );
+
+    log_to_file(format!(
+        "[SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%)",
+        token, profit, roi
+    ));
 
     // 简单追加到另一个文件方便统计
     let file_path = "shadow_results.csv";

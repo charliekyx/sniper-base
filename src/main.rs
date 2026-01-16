@@ -16,6 +16,7 @@ use dotenv::dotenv;
 use ethers::abi::parse_abi;
 use ethers::prelude::*;
 use ethers::providers::Ipc;
+use ethers::utils::hex;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -98,7 +99,7 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             "Sell_Fee_Token->ETH"
         };
         return get_path_token(2, false).map(|t| (action.to_string(), t));
-    } else if sig == [0x38, 0xed, 0x17, 0x39] {
+    } else if sig == [0x38, 0xed, 0x17, 0x39] || sig == [0x5c, 0x11, 0xd7, 0x95] {
         return get_path_token(2, true).map(|t| ("Swap_Token->Token".to_string(), t));
     } else if sig == [0xf3, 0x05, 0xd7, 0x19] {
         return read_address(4).map(|t| ("AddLiquidity".to_string(), t));
@@ -420,14 +421,23 @@ async fn process_transaction(
         // 1. 只要是目标钱包的交易，先打日志，防止“静默失效”
         let is_from_target = targets.contains(&tx.from);
         if is_from_target {
-            let msg = format!("[ACTIVITY] Target wallet {:?} sent tx to {:?}", tx.from, to);
+            let selector = if tx.input.len() >= 4 {
+                hex::encode(&tx.input[0..4])
+            } else {
+                "0x".to_string()
+            };
+            let msg = format!(
+                "[ACTIVITY] Target: {:?} | To: {:?} | Selector: 0x{}",
+                tx.from, to, selector
+            );
             println!("{}", msg);
             log_to_file(msg);
         }
 
         let router_name = get_router_name(&to);
+        let decoded = decode_router_input(&tx.input);
 
-        if let Some((action, token_addr)) = decode_router_input(&tx.input) {
+        if let Some((action, token_addr)) = decoded {
             if is_from_target && router_name == "Unknown" {
                 println!(
                     "   [DEBUG] Target interacted with unknown router/contract: {:?}",
@@ -436,6 +446,13 @@ async fn process_transaction(
                 log_to_file(format!(
                     "   [DEBUG] Target interacted with unknown router/contract: {:?}",
                     to
+                ));
+            }
+
+            if is_from_target {
+                log_to_file(format!(
+                    "   [MATCH] Action: {} | Token: {:?}",
+                    action, token_addr
                 ));
             }
 
@@ -558,6 +575,12 @@ async fn process_transaction(
 
                 // 影子模式下直接返回，不进入实盘逻辑
                 return;
+            } else if is_from_target {
+                // 如果是目标钱包但没解析出来，记录一下，方便后续增加 ABI 支持
+                log_to_file(format!(
+                    "   [SKIP] Could not decode input for target tx to {:?}",
+                    to
+                ));
             }
 
             // Real Trading Logic (Only reached if shadow_mode is false)

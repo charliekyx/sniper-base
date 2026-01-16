@@ -16,7 +16,6 @@ use dotenv::dotenv;
 use ethers::abi::parse_abi;
 use ethers::prelude::*;
 use ethers::providers::Ipc;
-use ethers::utils::hex;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -422,7 +421,7 @@ async fn process_transaction(
         let is_from_target = targets.contains(&tx.from);
         if is_from_target {
             let selector = if tx.input.len() >= 4 {
-                hex::encode(&tx.input[0..4])
+                ethers::utils::hex::encode(&tx.input[0..4])
             } else {
                 "0x".to_string()
             };
@@ -753,7 +752,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(h) = block.hash {
                 let hb_msg = format!("[HEARTBEAT] Still scanning... Latest Block: {:?}", h);
                 println!(">>> {}", hb_msg);
-                log_to_file(hb_msg);
             }
         }
 

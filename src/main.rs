@@ -6,7 +6,7 @@ mod simulation;
 
 use crate::config::AppConfig;
 use crate::constants::{
-    get_router_name, ALIENBASE_ROUTER, BASESWAP_ROUTER, SUSHI_ROUTER, WETH_BASE,
+    get_router_name, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER, SUSHI_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -614,11 +614,16 @@ async fn process_transaction(
                 || r_name == "Unknown"
             {
                 println!(
-                    "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (BaseSwap, AlienBase, Sushi)...",
+                    "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (Aerodrome, BaseSwap, AlienBase, Sushi)...",
                     r_name, to
                 );
-                // 优先顺序：BaseSwap -> AlienBase -> SushiSwap
-                routers_to_try = vec![*BASESWAP_ROUTER, *ALIENBASE_ROUTER, *SUSHI_ROUTER];
+                // 优先顺序：Aerodrome (Base No.1) -> BaseSwap -> AlienBase -> SushiSwap
+                routers_to_try = vec![
+                    *AERODROME_ROUTER,
+                    *BASESWAP_ROUTER,
+                    *ALIENBASE_ROUTER,
+                    *SUSHI_ROUTER,
+                ];
             }
 
             for router in routers_to_try {

@@ -129,13 +129,12 @@ impl Simulator {
         let result_amounts = match evm.transact_commit() {
             Ok(result) => result,
             Err(_) => {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "GetAmountsOut Failed".to_string(),
-                    0,
-                ))
+                // 如果 getAmountsOut 失败（例如池子不存在），我们不直接退出
+                // 而是标记 expected_tokens 为 0，继续尝试执行买入，看是否能成功
+                ExecutionResult::Revert {
+                    gas_used: 0,
+                    output: vec![].into(),
+                }
             }
         };
 
@@ -144,20 +143,15 @@ impl Simulator {
                 output: Output::Call(b),
                 ..
             } => {
-                let amounts: Vec<U256> = router.decode_output("getAmountsOut", b)?;
-                *amounts
+                // 尝试解码，如果失败（比如返回空字节），则视为 0
+                router
+                    .decode_output::<Vec<U256>, _>("getAmountsOut", b)
+                    .unwrap_or_default()
                     .last()
-                    .ok_or_else(|| anyhow::anyhow!("Empty amounts"))?
+                    .cloned()
+                    .unwrap_or_default()
             }
-            _ => {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "GetAmountsOut Failed".to_string(),
-                    0,
-                ))
-            }
+            _ => U256::zero(), // 如果 revert 或其他错误，预期数量设为 0
         };
 
         let deadline = U256::from(9999999999u64);
@@ -218,7 +212,8 @@ impl Simulator {
             ));
         }
 
-        if token_balance * 10 < expected_tokens * 8 {
+        // 只有当 expected_tokens > 0 时才检查滑点，否则（盲买）跳过此检查
+        if !expected_tokens.is_zero() && token_balance * 10 < expected_tokens * 8 {
             return Ok((
                 false,
                 U256::zero(),

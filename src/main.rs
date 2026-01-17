@@ -1094,9 +1094,10 @@ async fn process_transaction(
                 strategies.push((*UNIVERSAL_ROUTER, Some(pk), "Extracted V4 Key".to_string()));
             }
 
-            // 2. 如果目标是 Universal Router 或 Unknown，尝试“盲猜” Clanker V4 配置
+            // 2. 总是尝试“盲猜” Clanker V4 配置 (即使目标用的是 Odos/1inch，最终流动性可能还在 V4)
             // Clanker V4 特征: Fee 1%, Tick 60, Hook = Factory
-            if r_name == "UniversalRouter" || r_name == "Unknown" {
+            // [修改] 去掉 router_name 的限制，强制加入 V4 盲测
+            {
                 let token0 = if token_addr < *WETH_BASE {
                     token_addr
                 } else {
@@ -1118,7 +1119,7 @@ async fn process_transaction(
                 strategies.push((
                     *UNIVERSAL_ROUTER,
                     Some(guess_key),
-                    "Guess Clanker V4".to_string(),
+                    "Guess Clanker V4 (1%)".to_string(),
                 ));
             }
 

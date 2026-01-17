@@ -514,8 +514,8 @@ async fn process_transaction(
                 };
                 let input_preview = ethers::utils::hex::encode(&tx.input);
                 log_to_file(format!(
-                    "   [IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
-                    to, selector, tx.input.len(), input_preview
+                    "   [IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {}",
+                    to, selector, tx.input.len()
                 ));
                 return;
             }

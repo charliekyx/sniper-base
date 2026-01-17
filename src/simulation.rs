@@ -207,7 +207,7 @@ impl Simulator {
                 false,
                 U256::zero(),
                 U256::zero(),
-                "Zero Tokens (High Tax?)".to_string(),
+                "Zero Tokens (High Tax or No Liquidity)".to_string(),
                 0,
             ));
         }

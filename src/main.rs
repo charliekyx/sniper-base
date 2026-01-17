@@ -496,11 +496,18 @@ async fn process_transaction(
                 ("Auto_Buy".to_string(), token)
             } else {
                 // 确实无法识别，打印日志并跳过
-                let selector = if tx.input.len() >= 4 {
-                    ethers::utils::hex::encode(&tx.input[0..4])
+                let selector_bytes = if tx.input.len() >= 4 {
+                    &tx.input[0..4]
                 } else {
-                    "0x".to_string()
+                    &[]
                 };
+                let selector = ethers::utils::hex::encode(selector_bytes);
+
+                // 忽略常见的非买入 Selector
+                // 0x095ea7b3: approve(address,uint256)
+                if selector == "095ea7b3" {
+                    return;
+                }
                 let input_preview = ethers::utils::hex::encode(&tx.input);
                 log_to_file(format!(
                     "   [SKIP] Could not decode input for target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",

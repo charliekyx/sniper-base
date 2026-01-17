@@ -309,6 +309,7 @@ async fn monitor_position(
     initial_cost_eth: U256,
     config: AppConfig,
     processing_locks: Arc<Mutex<HashSet<Address>>>,
+    initial_simulated_tokens: Option<U256>, // [新增] 用于影子模式的虚拟持仓
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
     // 修复：使用 expect/match 替代 unwrap，防止 panic
@@ -323,6 +324,7 @@ async fn monitor_position(
 
     let mut sold_half = false;
     let mut check_count = 0;
+    let mut shadow_balance = initial_simulated_tokens.unwrap_or(U256::zero());
 
     loop {
         check_count += 1;
@@ -331,17 +333,21 @@ async fn monitor_position(
         }
 
         // 修复：如果网络错误，不崩溃，而是等待重试
-        let balance: U256 = match token_contract.method("balanceOf", client.address()) {
-            Ok(m) => match m.call().await {
-                Ok(b) => b,
+        let balance: U256 = if config.shadow_mode {
+            shadow_balance
+        } else {
+            match token_contract.method("balanceOf", client.address()) {
+                Ok(m) => match m.call().await {
+                    Ok(b) => b,
+                    Err(_) => {
+                        sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                },
                 Err(_) => {
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 }
-            },
-            Err(_) => {
-                sleep(Duration::from_secs(1)).await;
-                continue;
             }
         };
 
@@ -378,10 +384,12 @@ async fn monitor_position(
         let mut trigger_sell = false;
         let mut is_panic = false;
         let mut sell_amount = balance;
+        let mut sell_reason = String::new();
 
         if config.sell_strategy_3x_exit_all && current_val >= initial_cost_eth * 3 {
             println!("[EXIT] 3x Profit! Dumping ALL.");
             trigger_sell = true;
+            sell_reason = "3x_Profit".to_string();
         } else if config.sell_strategy_2x_exit_half
             && !sold_half
             && current_val >= initial_cost_eth * 2
@@ -390,29 +398,38 @@ async fn monitor_position(
             trigger_sell = true;
             sell_amount = balance / 2;
             sold_half = true;
+            sell_reason = "2x_Profit_Half".to_string();
         } else {
             let stop_loss_limit = initial_cost_eth * (100 - config.anti_rug_dip_threshold) / 100;
             if current_val < stop_loss_limit {
                 println!("[ALERT] Price crashed! Panic Selling!");
                 trigger_sell = true;
                 is_panic = true;
+                sell_reason = "Stop_Loss".to_string();
             }
         }
 
         if trigger_sell {
             if config.shadow_mode {
                 // 影子模式：记录数据并退出监控
+                // 注意：这里计算的是本次卖出的价值，如果是半仓卖出，initial_cost_eth 只是参考
                 crate::logger::log_shadow_sell(
                     format!("{:?}", token_addr),
                     ethers::utils::format_units(initial_cost_eth, "ether").unwrap(),
                     ethers::utils::format_units(current_val, "ether").unwrap(),
-                    is_panic,
+                    sell_reason.clone(),
                 );
-                // 影子模式卖出后释放锁
-                if let Ok(mut locks) = processing_locks.lock() {
-                    locks.remove(&token_addr);
+
+                // 如果是半仓卖出，更新虚拟余额并继续监控
+                if sell_reason == "2x_Profit_Half" {
+                    shadow_balance = shadow_balance - sell_amount;
+                } else {
+                    // 全仓卖出或止损，退出
+                    if let Ok(mut locks) = processing_locks.lock() {
+                        locks.remove(&token_addr);
+                    }
+                    break;
                 }
-                break;
             } else {
                 // 实盘模式：执行真实卖出
                 let _ = execute_smart_sell(
@@ -603,13 +620,20 @@ async fn process_transaction(
                 )
                 .await;
 
-            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = sim_res.unwrap_or((
-                false,
-                U256::zero(),
-                U256::zero(),
-                "Sim Error".to_string(),
-                0,
-            ));
+            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = match sim_res {
+                Ok(res) => res,
+                Err(e) => {
+                    // Log the actual error to help debugging
+                    println!("   [Error] Simulation failed with error: {:?}", e);
+                    (
+                        false,
+                        U256::zero(),
+                        U256::zero(),
+                        format!("Sim Error: {}", e),
+                        0,
+                    )
+                }
+            };
 
             if config.shadow_mode {
                 println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
@@ -652,6 +676,7 @@ async fn process_transaction(
                         buy_amt,
                         config.clone(),
                         processing_locks.clone(),
+                        Some(expected_tokens), // [新增] 传入模拟的代币数量
                     ));
                 } else {
                     // 修复：如果模拟失败，立即释放锁，以便下次机会
@@ -707,6 +732,7 @@ async fn process_transaction(
                         buy_amt,
                         config,
                         processing_locks.clone(),
+                        None, // 实盘模式不需要传入虚拟余额
                     ));
                 }
                 Err(e) => {
@@ -786,6 +812,7 @@ async fn main() -> anyhow::Result<()> {
                 pos.initial_cost_eth,
                 cfg,
                 processing_locks.clone(),
+                None, // 恢复持仓时，如果是 Shadow Mode 且没有持久化虚拟余额，这里可能会直接退出，这是预期行为
             ));
         }
     }

@@ -352,6 +352,11 @@ impl Simulator {
             .map_err(|_| anyhow::anyhow!("Failed to fetch account info"))?
             .unwrap_or_default();
         account.balance = rU256::MAX;
+
+        // [Fix] Manually set nonce to match the transaction nonce to bypass nonce checks
+        // This is crucial for simulating past transactions or out-of-order transactions
+        account.nonce = tx.nonce.as_u64();
+
         cache_db.insert_account_info(caller, account);
 
         let mut evm = EVM {

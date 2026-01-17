@@ -65,7 +65,7 @@ pub fn log_shadow_trade(record: ShadowRecord) {
     }
 }
 
-pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, is_panic: bool) {
+pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, strategy: String) {
     let initial: f64 = initial_eth.parse().unwrap_or(0.0);
     let final_val: f64 = final_eth.parse().unwrap_or(0.0);
     let profit = final_val - initial;
@@ -76,13 +76,13 @@ pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, is
     };
 
     println!(
-        "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Panic: {}",
-        token, profit, roi, is_panic
+        "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Strategy: {}",
+        token, profit, roi, strategy
     );
 
     log_to_file(format!(
-        "[SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%)",
-        token, profit, roi
+        "[SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Strategy: {}",
+        token, profit, roi, strategy
     ));
 
     // 简单追加到另一个文件方便统计
@@ -99,6 +99,7 @@ pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, is
             final_eth,
             profit.to_string(),
             format!("{:.2}%", roi),
+            strategy,
         ]);
         let _ = wtr.flush();
     }

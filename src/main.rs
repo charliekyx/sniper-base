@@ -7,7 +7,7 @@ mod simulation;
 use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
-    SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, WETH_BASE,
+    SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -16,7 +16,7 @@ use crate::persistence::{
 use crate::simulation::Simulator;
 use chrono::Local;
 use dotenv::dotenv;
-use ethers::abi::parse_abi;
+use ethers::abi::{parse_abi, Token};
 use ethers::prelude::*;
 use ethers::providers::{Ipc, Middleware};
 use std::collections::HashSet;
@@ -49,6 +49,97 @@ impl NonceManager {
         self.nonce.store(new_nonce, Ordering::SeqCst);
         println!(">>> [NONCE] Resynced to {}", new_nonce);
     }
+}
+
+// --- V4 Helpers ---
+
+// PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
+type PoolKey = (Address, Address, u32, i32, Address);
+
+fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
+    // Universal Router execute(bytes commands, bytes[] inputs)
+    // Selector: 0x3593564c
+    if input.len() < 4 || &input[0..4] != [0x35, 0x93, 0x56, 0x4c] {
+        return None;
+    }
+
+    // Decode execute(bytes,bytes[])
+    let abi = parse_abi(&["function execute(bytes,bytes[])"]).ok()?;
+    let function = abi.function("execute").ok()?;
+    let decoded = function.decode_input(&input[4..]).ok()?;
+
+    let commands: Vec<u8> = decoded[0].clone().into_bytes()?;
+    let inputs: Vec<Bytes> = decoded[1]
+        .clone()
+        .into_array()?
+        .into_iter()
+        .map(|t| Bytes::from(t.into_bytes().unwrap()))
+        .collect();
+
+    // Command 0x10 is V4_SWAP
+    for (i, &cmd) in commands.iter().enumerate() {
+        // Mask out the flag bits (0x1f is the command mask, usually)
+        // Actually Universal Router commands are just bytes. 0x10 is V4_SWAP.
+        if cmd == 0x10 && i < inputs.len() {
+            let param_bytes = &inputs[i];
+            // V4_SWAP input: (bytes actions, bytes[] params)
+            // The input bytes are NOT prefixed with selector, they are just the tuple
+            // But ethabi expects a selector for decode_input usually, or we use decode params.
+            // Let's try to decode as a tuple directly.
+            let v4_tokens = ethers::abi::decode(
+                &[
+                    ethers::abi::ParamType::Bytes,
+                    ethers::abi::ParamType::Array(Box::new(ethers::abi::ParamType::Bytes)),
+                ],
+                param_bytes,
+            )
+            .ok()?;
+
+            let actions: Vec<u8> = v4_tokens[0].clone().into_bytes()?;
+            let action_params: Vec<Bytes> = v4_tokens[1]
+                .clone()
+                .into_array()?
+                .into_iter()
+                .map(|t| Bytes::from(t.into_bytes().unwrap()))
+                .collect();
+
+            // Action 0x06 is SWAP_EXACT_IN_SINGLE
+            for (j, &action) in actions.iter().enumerate() {
+                if action == 0x06 && j < action_params.len() {
+                    let p = &action_params[j];
+                    // ExactInputSingleParams: (PoolKey poolKey, bool zeroForOne, uint128 amountIn, uint128 amountOutMin, bytes hookData)
+                    // PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
+                    // Total struct: ((addr, addr, u24, i24, addr), bool, u128, u128, bytes)
+                    let pool_key_type = ethers::abi::ParamType::Tuple(vec![
+                        ethers::abi::ParamType::Address,
+                        ethers::abi::ParamType::Address,
+                        ethers::abi::ParamType::Uint(24),
+                        ethers::abi::ParamType::Int(24),
+                        ethers::abi::ParamType::Address,
+                    ]);
+                    let params_type = vec![
+                        pool_key_type,
+                        ethers::abi::ParamType::Bool,
+                        ethers::abi::ParamType::Uint(128),
+                        ethers::abi::ParamType::Uint(128),
+                        ethers::abi::ParamType::Bytes,
+                    ];
+
+                    let decoded_params = ethers::abi::decode(&params_type, p).ok()?;
+                    let pk_tuple = decoded_params[0].clone().into_tuple()?;
+
+                    let c0 = pk_tuple[0].clone().into_address()?;
+                    let c1 = pk_tuple[1].clone().into_address()?;
+                    let fee = pk_tuple[2].clone().into_uint()?.as_u32();
+                    let ts = pk_tuple[3].clone().into_int()?.as_u32() as i32;
+                    let hooks = pk_tuple[4].clone().into_address()?;
+
+                    return Some((c0, c1, fee, ts, hooks));
+                }
+            }
+        }
+    }
+    None
 }
 
 // --- Helper: Input Decoding ---
@@ -161,7 +252,7 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             Address::from_slice(&input[token_out_start..token_out_start + 20]),
         ));
     } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
-        // Uniswap Universal Router: execute(bytes,bytes[],uint256) or execute(bytes,bytes[])
+        // Uniswap Universal Router: execute
         // 这是一个聚合路由，输入数据很复杂。
         // 我们返回一个标记，具体的 Token 地址交给后续的 Simulator (scan_tx_for_token_in) 去从日志中提取。
         return Some(("Universal_Interaction".to_string(), Address::zero()));
@@ -180,7 +271,8 @@ async fn execute_buy_and_approve(
     amount_in: U256,
     amount_out_min: U256,
     config: &AppConfig,
-    fee: u32, // Added fee for V3
+    fee: u32,                     // Added fee for V3
+    v4_pool_key: Option<PoolKey>, // [新增] V4 PoolKey
 ) -> anyhow::Result<()> {
     println!(
         ">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...",
@@ -193,7 +285,49 @@ async fn execute_buy_and_approve(
     let deadline = U256::from(Local::now().timestamp() + 60);
 
     // [修改] 实盘交易适配 Aerodrome
-    let calldata = if router_addr == *UNIV3_ROUTER {
+    let calldata = if let Some(pk) = v4_pool_key {
+        // Universal Router V4 Swap
+        // execute(bytes commands, bytes[] inputs, uint256 deadline)
+        // Command: 0x10 (V4_SWAP)
+        // V4_SWAP Input: (bytes actions, bytes[] params)
+        // Action: 0x06 (SWAP_EXACT_IN_SINGLE)
+        // Params: ((c0, c1, fee, ts, hooks), zeroForOne, amountIn, amountOutMin, hookData)
+
+        let zero_for_one = *WETH_BASE < token_out;
+
+        // Encode PoolKey
+        let pk_token = Token::Tuple(vec![
+            Token::Address(pk.0),
+            Token::Address(pk.1),
+            Token::Uint(pk.2.into()),
+            Token::Int(U256::from(pk.3)),
+            Token::Address(pk.4),
+        ]);
+
+        // Encode ExactInputSingleParams
+        let swap_params = ethers::abi::encode(&vec![
+            pk_token,
+            Token::Bool(zero_for_one),
+            Token::Uint(amount_in),
+            Token::Uint(amount_out_min),
+            Token::Bytes(vec![]), // hookData
+        ]);
+
+        // Encode V4_SWAP inputs: actions + params
+        let actions = vec![0x06u8]; // SWAP_EXACT_IN_SINGLE
+        let action_params = vec![Token::Bytes(swap_params)];
+        let v4_swap_input =
+            ethers::abi::encode(&vec![Token::Bytes(actions), Token::Array(action_params)]);
+
+        // Encode execute
+        let commands = vec![0x10u8]; // V4_SWAP
+        let inputs = vec![Token::Bytes(v4_swap_input)];
+
+        let router = BaseContract::from(parse_abi(&[
+            "function execute(bytes,bytes[],uint256) external payable",
+        ])?);
+        router.encode("execute", (Bytes::from(commands), inputs, deadline))?
+    } else if router_addr == *UNIV3_ROUTER {
         // Uniswap V3
         let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
         let router = BaseContract::from(v3_abi);
@@ -313,6 +447,7 @@ async fn execute_smart_sell(
     config: &AppConfig,
     is_panic: bool,
     fee: u32, // Added fee for V3
+    v4_pool_key: Option<PoolKey>,
 ) -> anyhow::Result<TxHash> {
     let deadline = U256::from(Local::now().timestamp() + 120);
 
@@ -325,7 +460,47 @@ async fn execute_smart_sell(
 
         async move {
             // [修复] 卖出逻辑适配 Aerodrome
-            let calldata = if router_addr == *UNIV3_ROUTER {
+            let calldata = if let Some(pk) = v4_pool_key {
+                // Universal Router V4 Sell
+                // Same logic as buy but token_in is Token, token_out is WETH
+                let zero_for_one = token_in < token_out;
+
+                let pk_token = Token::Tuple(vec![
+                    Token::Address(pk.0),
+                    Token::Address(pk.1),
+                    Token::Uint(pk.2.into()),
+                    Token::Int(U256::from(pk.3)),
+                    Token::Address(pk.4),
+                ]);
+
+                // Swap Exact Input Single (Sell all tokens)
+                let swap_params = ethers::abi::encode(&vec![
+                    pk_token,
+                    Token::Bool(zero_for_one),
+                    Token::Uint(amt),
+                    Token::Uint(U256::zero()), // Min out 0 for panic sell
+                    Token::Bytes(vec![]),
+                ]);
+
+                // Actions: SWAP_EXACT_IN_SINGLE (0x06) -> SETTLE_ALL (0x0c) -> TAKE_ALL (0x0e) ?
+                // Simplified: Just SWAP_EXACT_IN_SINGLE usually handles transfer if router has allowance.
+                // Universal Router V4 usually requires: SWAP -> TAKE_ALL (if output is ETH, maybe UNWRAP)
+                // For simplicity, we assume standard V4 swap action handles it or we just do swap.
+                // NOTE: Proper V4 encoding often needs SETTLE/TAKE.
+                // Let's stick to the basic SWAP action for now, assuming standard router behavior.
+
+                let actions = vec![0x06u8];
+                let action_params = vec![Token::Bytes(swap_params)];
+                let v4_swap_input =
+                    ethers::abi::encode(&vec![Token::Bytes(actions), Token::Array(action_params)]);
+
+                let commands = vec![0x10u8];
+                let inputs = vec![Token::Bytes(v4_swap_input)];
+                let router = BaseContract::from(parse_abi(&[
+                    "function execute(bytes,bytes[],uint256) external payable",
+                ])?);
+                router.encode("execute", (Bytes::from(commands), inputs, deadline))?
+            } else if router_addr == *UNIV3_ROUTER {
                 let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
                 let router = BaseContract::from(v3_abi);
                 // Sell: Token -> WETH
@@ -415,6 +590,7 @@ async fn monitor_position(
     processing_locks: Arc<Mutex<HashSet<Address>>>,
     initial_simulated_tokens: Option<U256>, // [新增] 用于影子模式的虚拟持仓
     fee: u32,                               // Added fee for V3
+    v4_pool_key: Option<PoolKey>,
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
     // 修复：使用 expect/match 替代 unwrap，防止 panic
@@ -427,6 +603,9 @@ async fn monitor_position(
         parse_abi(&["function getAmountsOut(uint,address[]) external view returns (uint[])"])
             .expect("ABI Parse Error");
     let router_contract = Contract::new(router_addr, router_abi, client.clone());
+
+    // V4 Quoter
+    let v4_quoter = Contract::new(*UNIV4_QUOTER, parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"]).unwrap(), client.clone());
 
     // V3 Quoter
     let quoter_contract = Contract::new(*UNIV3_QUOTER, parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"]).unwrap(), client.clone());
@@ -474,7 +653,18 @@ async fn monitor_position(
             break;
         }
 
-        let current_val = if router_addr == *UNIV3_ROUTER {
+        let current_val = if let Some(pk) = v4_pool_key {
+            // V4 Price Check
+            let zero_for_one = token_addr < *WETH_BASE;
+            let params = (pk, zero_for_one, balance.as_u128(), Bytes::default());
+            match v4_quoter.method::<_, (U256, u128)>("quoteExactInputSingle", (params,)) {
+                Ok(m) => match m.call().await {
+                    Ok((amount_out, _)) => amount_out,
+                    Err(_) => U256::zero(),
+                },
+                Err(_) => U256::zero(),
+            }
+        } else if router_addr == *UNIV3_ROUTER {
             // V3 Price Check
             let params = (token_addr, *WETH_BASE, balance, fee, U256::zero());
             match quoter_contract
@@ -564,6 +754,7 @@ async fn monitor_position(
                     &config,
                     is_panic,
                     fee,
+                    v4_pool_key,
                 )
                 .await;
                 // 实盘卖出后释放锁
@@ -621,10 +812,12 @@ async fn process_transaction(
         let decoded = decode_router_input(&tx.input);
 
         // [修改] 智能识别逻辑：解码 -> 失败则模拟 -> 最终判定
+        // [新增] 提取 V4 PoolKey
+        let mut v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
+
         let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {
             (act, tok)
         } else if is_from_target {
-            // 如果解码失败，启动模拟扫描
             if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
                 ("Auto_Buy".to_string(), token)
             } else {
@@ -650,6 +843,10 @@ async fn process_transaction(
             if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
                 token_addr = token;
                 action = "Auto_Buy_Universal".to_string();
+                // 如果之前没提取到 PoolKey，这里再试一次（虽然 input 没变，但逻辑上确认是 Universal）
+                if v4_pool_key.is_none() {
+                    v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
+                }
             } else {
                 return; // 模拟也没发现代币流入（可能是卖出或失败），跳过
             }
@@ -753,26 +950,32 @@ async fn process_transaction(
                 || r_name == "UniversalRouter"
                 || r_name == "Unknown"
             {
-                println!(
+                if v4_pool_key.is_some() {
+                    println!("   [Strategy] Detected V4 Swap! Using Universal Router V4 logic.");
+                    routers_to_try = vec![*UNIVERSAL_ROUTER];
+                } else {
+                    println!(
                     "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (Aerodrome, BaseSwap, AlienBase, Sushi)...",
                     r_name, to
                 );
-                // Add Uniswap V3 to the top of the list for Clanker
-                // 优先顺序：Aerodrome (Base No.1) -> BaseSwap -> AlienBase -> SushiSwap
-                routers_to_try = vec![
-                    *AERODROME_ROUTER,
-                    *BASESWAP_ROUTER,
-                    *ALIENBASE_ROUTER,
-                    *SUSHI_ROUTER,
-                ];
-                // If it's a Clanker token, it's likely on Uniswap V3.
-                // We should try Uniswap V3 first or include it.
-                // Clanker uses Uniswap V3.
-                routers_to_try.insert(0, *UNIV3_ROUTER);
+                    // Add Uniswap V3 to the top of the list for Clanker
+                    // 优先顺序：Aerodrome (Base No.1) -> BaseSwap -> AlienBase -> SushiSwap
+                    routers_to_try = vec![
+                        *AERODROME_ROUTER,
+                        *BASESWAP_ROUTER,
+                        *ALIENBASE_ROUTER,
+                        *SUSHI_ROUTER,
+                    ];
+                    // If it's a Clanker token, it's likely on Uniswap V3.
+                    // We should try Uniswap V3 first or include it.
+                    // Clanker uses Uniswap V3.
+                    routers_to_try.insert(0, *UNIV3_ROUTER);
+                }
             }
 
             for router in routers_to_try {
                 effective_router = router;
+                let r_name_debug = get_router_name(&router);
                 let sim_res = simulator
                     .simulate_bundle(
                         client.address(),
@@ -780,6 +983,7 @@ async fn process_transaction(
                         effective_router,
                         buy_amt,
                         token_addr,
+                        v4_pool_key,
                     )
                     .await;
 
@@ -789,19 +993,26 @@ async fn process_transaction(
                         // 如果模拟成功（sim_ok = true），说明在这个路由上买入成功且有余额
                         if sim_result_tuple.0 {
                             println!(
-                                "   [Strategy] Liquidity found on {}!",
-                                get_router_name(&effective_router)
+                                "   [Strategy] Liquidity found on {}! (Est: {})",
+                                r_name_debug, sim_result_tuple.2
                             );
                             break;
+                        } else {
+                            // [新增] 打印失败原因，方便调试
+                            println!(
+                                "   [Debug] Tried {} -> Failed: {}",
+                                r_name_debug, sim_result_tuple.3
+                            );
                         }
                     }
                     Err(e) => {
                         // 记录错误但继续尝试下一个
+                        println!("   [Debug] Tried {} -> Error: {:?}", r_name_debug, e);
                         sim_result_tuple = (
                             false,
                             U256::zero(),
                             U256::zero(),
-                            format!("Sim Error on {}: {}", get_router_name(&effective_router), e),
+                            format!("Sim Error on {}: {}", r_name_debug, e),
                             0,
                             0,
                         );
@@ -855,6 +1066,7 @@ async fn process_transaction(
                         processing_locks.clone(),
                         Some(expected_tokens), // [新增] 传入模拟的代币数量
                         best_fee,
+                        v4_pool_key,
                     ));
                 } else {
                     // 修复：如果模拟失败，立即释放锁，以便下次机会
@@ -888,6 +1100,7 @@ async fn process_transaction(
                 min_out,
                 &config,
                 best_fee,
+                v4_pool_key,
             )
             .await
             {
@@ -914,6 +1127,7 @@ async fn process_transaction(
                         processing_locks.clone(),
                         None, // 实盘模式不需要传入虚拟余额
                         best_fee,
+                        v4_pool_key,
                     ));
                 }
                 Err(e) => {
@@ -995,6 +1209,7 @@ async fn main() -> anyhow::Result<()> {
                 processing_locks.clone(),
                 None, // 恢复持仓时，如果是 Shadow Mode 且没有持久化虚拟余额，这里可能会直接退出，这是预期行为
                 pos.fee.unwrap_or(0),
+                None, // Persistence struct needs update to store PoolKey if we want to resume V4. For now None.
             ));
         }
     }

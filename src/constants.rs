@@ -12,6 +12,11 @@ lazy_static! {
     pub static ref UNIV3_ROUTER: Address = Address::from_str("0x2626664c2603336E57B271c5C0b26F421741e481").unwrap();
     pub static ref UNIV3_QUOTER: Address = Address::from_str("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a").unwrap();
     pub static ref AERODROME_ROUTER: Address = Address::from_str("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43").unwrap();
+
+    // Uniswap V4 (Base)
+    pub static ref UNIV4_POOL_MANAGER: Address = Address::from_str("0x498581fF718922c3f8e6A244956aF099B2652b2b").unwrap();
+    pub static ref UNIV4_QUOTER: Address = Address::from_str("0x0d5e0f971ed27fbff6c2837bf31316121532048d").unwrap();
+
     pub static ref AERODROME_FACTORY: Address = Address::from_str("0x420DD381b31aEf6683db6B902084cB0FFECe40Da").unwrap();
     pub static ref SUSHI_ROUTER: Address = Address::from_str("0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891").unwrap();
     pub static ref ONEINCH_ROUTER: Address = Address::from_str("0x1111111254fb6c44bac0bed2854e76f90643097d").unwrap();

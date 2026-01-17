@@ -112,7 +112,7 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let path_len = read_usize(len_ptr)?;
 
         // 最短路径: In(20) + Fee(3) + Out(20) = 43 字节
-        if path_len < 43 {
+        if path_len < 40 {
             return None;
         }
 
@@ -608,12 +608,6 @@ async fn process_transaction(
 
                 // 影子模式下直接返回，不进入实盘逻辑
                 return;
-            } else if is_from_target {
-                // 如果是目标钱包但没解析出来，记录一下，方便后续增加 ABI 支持
-                log_to_file(format!(
-                    "   [SKIP] Could not decode input for target tx to {:?}",
-                    to
-                ));
             }
 
             // Real Trading Logic (Only reached if shadow_mode is false)
@@ -668,6 +662,18 @@ async fn process_transaction(
                     cleanup(token_addr);
                 }
             }
+        } else if is_from_target {
+            // 捕获无法解析的目标交易，并打印 Input 数据以便调试
+            let selector = if tx.input.len() >= 4 {
+                ethers::utils::hex::encode(&tx.input[0..4])
+            } else {
+                "0x".to_string()
+            };
+            let input_preview = ethers::utils::hex::encode(&tx.input);
+            log_to_file(format!(
+                "   [SKIP] Could not decode input for target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
+                to, selector, tx.input.len(), input_preview
+            ));
         }
     }
 }

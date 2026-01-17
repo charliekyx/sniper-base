@@ -15,6 +15,7 @@ use revm::{
 use std::cell::RefCell;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 
 #[derive(Clone)]
 pub struct Simulator {
@@ -295,31 +296,37 @@ impl Simulator {
     pub async fn scan_tx_for_token_in(&self, tx: Transaction) -> Result<Option<Address>> {
         // 1. 优先策略：直接获取交易回执 (Receipt)
         // 对于已上链的交易，这是最快且 100% 准确的方法，不需要模拟
-        if let Ok(Some(receipt)) = self.provider.get_transaction_receipt(tx.hash).await {
-            let transfer_sig = rB256::from_str(
-                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-            )
-            .unwrap();
-            let mut topic_bytes = [0u8; 32];
-            topic_bytes[12..32].copy_from_slice(&tx.from.0);
-            let target_topic = rB256::from(topic_bytes); // 补齐 32 字节的 Address
+        // [优化] 增加重试机制，防止节点索引延迟导致查不到 Receipt
+        for _ in 0..3 {
+            match self.provider.get_transaction_receipt(tx.hash).await {
+                Ok(Some(receipt)) => {
+                    let transfer_sig = rB256::from_str(
+                        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    )
+                    .unwrap();
+                    let mut topic_bytes = [0u8; 32];
+                    topic_bytes[12..32].copy_from_slice(&tx.from.0);
+                    let target_topic = rB256::from(topic_bytes); // 补齐 32 字节的 Address
 
-            for log in receipt.logs {
-                // Transfer(from, to, value) -> Topic[0]=Sig, Topic[1]=From, Topic[2]=To
-                if log.topics.len() == 3
-                    && rB256::from_slice(log.topics[0].as_bytes()) == transfer_sig
-                {
-                    // 检查接收方是否是目标钱包
-                    if rB256::from_slice(log.topics[2].as_bytes()) == target_topic {
-                        let token_addr = Address::from(log.address);
-                        if token_addr != *WETH_BASE {
-                            return Ok(Some(token_addr));
+                    for log in receipt.logs {
+                        // Transfer(from, to, value) -> Topic[0]=Sig, Topic[1]=From, Topic[2]=To
+                        if log.topics.len() == 3
+                            && rB256::from_slice(log.topics[0].as_bytes()) == transfer_sig
+                        {
+                            // 检查接收方是否是目标钱包
+                            if rB256::from_slice(log.topics[2].as_bytes()) == target_topic {
+                                let token_addr = Address::from(log.address);
+                                if token_addr != *WETH_BASE {
+                                    return Ok(Some(token_addr));
+                                }
+                            }
                         }
                     }
+                    // 如果查到了 Receipt 但没有符合条件的 Transfer，说明确实没买，直接返回 None
+                    return Ok(None);
                 }
+                _ => sleep(Duration::from_millis(50)).await, // 没查到，稍微等一下节点索引
             }
-            // 如果查了回执但没发现 Token 入账，说明确实没买
-            return Ok(None);
         }
 
         // 2. 兜底策略：模拟执行 (主要针对 Pending 交易或回执获取失败)
@@ -337,6 +344,16 @@ impl Simulator {
         let fork_db = ForkDB::new(ethers_db);
         let mut cache_db = CacheDB::new(fork_db);
 
+        // [Fix] Manually set balance to MAX to bypass balance checks since disable_balance_check is not available in revm 3.5.0
+        // We do this before creating EVM to avoid borrow checker issues
+        let caller = rAddress::from(tx.from.0);
+        let mut account = cache_db
+            .basic(caller)
+            .map_err(|_| anyhow::anyhow!("Failed to fetch account info"))?
+            .unwrap_or_default();
+        account.balance = rU256::MAX;
+        cache_db.insert_account_info(caller, account);
+
         let mut evm = EVM {
             env: Default::default(),
             db: Some(&mut cache_db),
@@ -346,7 +363,7 @@ impl Simulator {
         evm.env.block.number = rU256::from(sim_block + 1);
 
         // 构造模拟交易环境
-        evm.env.tx.caller = rAddress::from(tx.from.0);
+        evm.env.tx.caller = caller;
         if let Some(to) = tx.to {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(to.0));
         } else {
@@ -363,6 +380,7 @@ impl Simulator {
         match evm.transact_commit() {
             Ok(ExecutionResult::Success { logs, .. }) => {
                 // Transfer 事件签名: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+                // 注意：这里我们只关心模拟结果中的日志，因为这是最真实的意图
                 let transfer_sig = rB256::from_str(
                     "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
                 )

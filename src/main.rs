@@ -5,7 +5,9 @@ mod persistence;
 mod simulation;
 
 use crate::config::AppConfig;
-use crate::constants::{get_router_name, BASESWAP_ROUTER, WETH_BASE};
+use crate::constants::{
+    get_router_name, ALIENBASE_ROUTER, BASESWAP_ROUTER, SUSHI_ROUTER, WETH_BASE,
+};
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
     init_storage, load_all_positions, remove_position, save_position, PositionData,
@@ -471,11 +473,20 @@ async fn process_transaction(
         // 1. 只要是目标钱包的交易，先打日志，防止“静默失效”
         let is_from_target = targets.contains(&tx.from);
         if is_from_target {
-            let selector = if tx.input.len() >= 4 {
-                ethers::utils::hex::encode(&tx.input[0..4])
+            let selector_bytes = if tx.input.len() >= 4 {
+                &tx.input[0..4]
             } else {
-                "0x".to_string()
+                &[]
             };
+            let selector = ethers::utils::hex::encode(selector_bytes);
+
+            // [新增] 提前过滤高频非交易操作，减少日志噪音
+            // 0x095ea7b3: approve(address,uint256)
+            // 0xa9059cbb: transfer(address,uint256)
+            if selector == "095ea7b3" || selector == "a9059cbb" {
+                return;
+            }
+
             let msg = format!(
                 "[ACTIVITY] Target: {:?} | To: {:?} | Selector: 0x{}",
                 tx.from, to, selector
@@ -496,21 +507,14 @@ async fn process_transaction(
                 ("Auto_Buy".to_string(), token)
             } else {
                 // 确实无法识别，打印日志并跳过
-                let selector_bytes = if tx.input.len() >= 4 {
-                    &tx.input[0..4]
+                let selector = if tx.input.len() >= 4 {
+                    ethers::utils::hex::encode(&tx.input[0..4])
                 } else {
-                    &[]
+                    "0x".to_string()
                 };
-                let selector = ethers::utils::hex::encode(selector_bytes);
-
-                // 忽略常见的非买入 Selector
-                // 0x095ea7b3: approve(address,uint256)
-                if selector == "095ea7b3" {
-                    return;
-                }
                 let input_preview = ethers::utils::hex::encode(&tx.input);
                 log_to_file(format!(
-                    "   [SKIP] Could not decode input for target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
+                    "   [IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
                     to, selector, tx.input.len(), input_preview
                 ));
                 return;
@@ -537,11 +541,6 @@ async fn process_transaction(
                     "   [MATCH] Action: {} | Token: {:?}",
                     action, token_addr
                 ));
-            }
-
-            if action == "Approve" {
-                // 忽略授权交易，减少日志噪音
-                return;
             }
 
             if router_name == "Unknown" && action != "AddLiquidity" {
@@ -591,21 +590,6 @@ async fn process_transaction(
             log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 
-            // [新增] 路由回退逻辑：如果目标使用的是聚合器或未知合约，强制使用 BaseSwap (V2)
-            let mut effective_router = to;
-            let r_name = get_router_name(&to);
-            if r_name == "Odos"
-                || r_name == "1inch"
-                || r_name == "UniversalRouter"
-                || r_name == "Unknown"
-            {
-                println!(
-                    "   [Strategy] Target uses {} ({:?}). Switching to BaseSwap for V2 execution.",
-                    r_name, to
-                );
-                effective_router = *BASESWAP_ROUTER;
-            }
-
             if config.sniper_block_delay > 0 && !config.shadow_mode {
                 let target_block = provider.get_block_number().await.unwrap_or_default()
                     + config.sniper_block_delay;
@@ -617,30 +601,64 @@ async fn process_transaction(
                 }
             }
 
-            let sim_res = simulator
-                .simulate_bundle(
-                    client.address(),
-                    None,
-                    effective_router,
-                    buy_amt,
-                    token_addr,
-                )
-                .await;
+            // [策略升级] 多路由扫描：如果目标使用聚合器，轮询主流 V2 DEX 直到找到流动性
+            let mut effective_router = to;
+            let mut sim_result_tuple = (false, U256::zero(), U256::zero(), "Init".to_string(), 0);
 
-            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = match sim_res {
-                Ok(res) => res,
-                Err(e) => {
-                    // Log the actual error to help debugging
-                    println!("   [Error] Simulation failed with error: {:?}", e);
-                    (
-                        false,
-                        U256::zero(),
-                        U256::zero(),
-                        format!("Sim Error: {}", e),
-                        0,
+            let r_name = get_router_name(&to);
+            let mut routers_to_try = vec![to];
+
+            if r_name == "Odos"
+                || r_name == "1inch"
+                || r_name == "UniversalRouter"
+                || r_name == "Unknown"
+            {
+                println!(
+                    "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (BaseSwap, AlienBase, Sushi)...",
+                    r_name, to
+                );
+                // 优先顺序：BaseSwap -> AlienBase -> SushiSwap
+                routers_to_try = vec![*BASESWAP_ROUTER, *ALIENBASE_ROUTER, *SUSHI_ROUTER];
+            }
+
+            for router in routers_to_try {
+                effective_router = router;
+                let sim_res = simulator
+                    .simulate_bundle(
+                        client.address(),
+                        None,
+                        effective_router,
+                        buy_amt,
+                        token_addr,
                     )
+                    .await;
+
+                match sim_res {
+                    Ok(res) => {
+                        sim_result_tuple = res;
+                        // 如果模拟成功（sim_ok = true），说明在这个路由上买入成功且有余额
+                        if sim_result_tuple.0 {
+                            println!(
+                                "   [Strategy] Liquidity found on {}!",
+                                get_router_name(&effective_router)
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        // 记录错误但继续尝试下一个
+                        sim_result_tuple = (
+                            false,
+                            U256::zero(),
+                            U256::zero(),
+                            format!("Sim Error on {}: {}", get_router_name(&effective_router), e),
+                            0,
+                        );
+                    }
                 }
-            };
+            }
+
+            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = sim_result_tuple;
 
             if config.shadow_mode {
                 println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
@@ -659,7 +677,7 @@ async fn process_transaction(
                 log_shadow_trade(ShadowRecord {
                     timestamp: Local::now().to_rfc3339(),
                     event_type: action.to_string(),
-                    router: router_name,
+                    router: get_router_name(&effective_router), // [修复] 记录实际使用的有效路由(如 BaseSwap)，而不是目标的路由(如 Odos)
                     trigger_hash: format!("{:?}", tx.hash),
                     token_address: format!("{:?}", token_addr),
                     amount_in_eth: config.buy_amount_eth.to_string(),

@@ -293,10 +293,45 @@ impl Simulator {
 
     // [新增] 自动扫描交易意图：不管 Input 是什么，只要模拟执行后发现目标收到了 Token，就认为是买入
     pub async fn scan_tx_for_token_in(&self, tx: Transaction) -> Result<Option<Address>> {
-        let block_number = self.provider.get_block_number().await?.as_u64();
+        // 1. 优先策略：直接获取交易回执 (Receipt)
+        // 对于已上链的交易，这是最快且 100% 准确的方法，不需要模拟
+        if let Ok(Some(receipt)) = self.provider.get_transaction_receipt(tx.hash).await {
+            let transfer_sig = rB256::from_str(
+                "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+            )
+            .unwrap();
+            let mut topic_bytes = [0u8; 32];
+            topic_bytes[12..32].copy_from_slice(&tx.from.0);
+            let target_topic = rB256::from(topic_bytes); // 补齐 32 字节的 Address
+
+            for log in receipt.logs {
+                // Transfer(from, to, value) -> Topic[0]=Sig, Topic[1]=From, Topic[2]=To
+                if log.topics.len() == 3
+                    && rB256::from_slice(log.topics[0].as_bytes()) == transfer_sig
+                {
+                    // 检查接收方是否是目标钱包
+                    if rB256::from_slice(log.topics[2].as_bytes()) == target_topic {
+                        let token_addr = Address::from(log.address);
+                        if token_addr != *WETH_BASE {
+                            return Ok(Some(token_addr));
+                        }
+                    }
+                }
+            }
+            // 如果查了回执但没发现 Token 入账，说明确实没买
+            return Ok(None);
+        }
+
+        // 2. 兜底策略：模拟执行 (主要针对 Pending 交易或回执获取失败)
+        // 关键修正：必须基于交易所在区块的 *前一个区块* 进行模拟，否则会因 Nonce 错误而失败
+        let sim_block = if let Some(bn) = tx.block_number {
+            bn.as_u64().saturating_sub(1)
+        } else {
+            self.provider.get_block_number().await?.as_u64()
+        };
 
         // 创建临时的 EthersDB 用于此次模拟
-        let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
+        let ethers_db = EthersDB::new(self.provider.clone(), Some(sim_block.into()))
             .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
 
         let fork_db = ForkDB::new(ethers_db);
@@ -308,7 +343,7 @@ impl Simulator {
         };
 
         evm.env.cfg.chain_id = 8453;
-        evm.env.block.number = rU256::from(block_number + 1);
+        evm.env.block.number = rU256::from(sim_block + 1);
 
         // 构造模拟交易环境
         evm.env.tx.caller = rAddress::from(tx.from.0);

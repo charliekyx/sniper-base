@@ -6,7 +6,8 @@ mod simulation;
 
 use crate::config::AppConfig;
 use crate::constants::{
-    get_router_name, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER, SUSHI_ROUTER, WETH_BASE,
+    get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
+    SUSHI_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -17,7 +18,7 @@ use chrono::Local;
 use dotenv::dotenv;
 use ethers::abi::parse_abi;
 use ethers::prelude::*;
-use ethers::providers::Ipc;
+use ethers::providers::{Ipc, Middleware};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -162,39 +163,59 @@ async fn execute_buy_and_approve(
     let nonce_buy = nonce_manager.get_and_increment();
     let nonce_approve = nonce_manager.get_and_increment();
 
-    let router_abi = parse_abi(&[
-        "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable"
-    ])?;
-    let router = BaseContract::from(router_abi);
-    let path = vec![token_in, token_out];
     let deadline = U256::from(Local::now().timestamp() + 60);
 
-    let calldata = router.encode(
-        "swapExactETHForTokensSupportingFeeOnTransferTokens",
-        (amount_out_min, path, client.address(), deadline),
-    )?;
+    // [修改] 实盘交易适配 Aerodrome
+    let calldata = if router_addr == *AERODROME_ROUTER {
+        let aero_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
+        let router = BaseContract::from(aero_abi);
+        let route = (
+            token_in,
+            token_out,
+            false, // stable
+            *AERODROME_FACTORY,
+        );
+        let routes = vec![route];
+        router.encode(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens",
+            (amount_out_min, routes, client.address(), deadline),
+        )?
+    } else {
+        // 标准 V2
+        let router_abi = parse_abi(&[
+            "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable"
+        ])?;
+        let router = BaseContract::from(router_abi);
+        let path = vec![token_in, token_out];
+        router.encode(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens",
+            (amount_out_min, path, client.address(), deadline),
+        )?
+    };
 
     let gas_price = client.provider().get_gas_price().await?;
     let priority_fee = U256::from(config.max_priority_fee_gwei * 1_000_000_000);
     let total_gas_price = gas_price + priority_fee;
 
-    let buy_tx = TransactionRequest::new()
+    let buy_tx = Eip1559TransactionRequest::new()
         .to(router_addr)
         .value(amount_in)
         .data(calldata.0)
-        .gas(config.gas_limit)
-        .gas_price(total_gas_price)
+        .gas(config.gas_limit) // Base 链建议给足 Gas
+        .max_fee_per_gas(total_gas_price)
+        .max_priority_fee_per_gas(priority_fee)
         .nonce(nonce_buy);
 
     let erc20_abi = parse_abi(&["function approve(address,uint) external returns (bool)"])?;
     let token_contract = BaseContract::from(erc20_abi);
     let approve_calldata = token_contract.encode("approve", (router_addr, U256::MAX))?;
 
-    let approve_tx = TransactionRequest::new()
+    let approve_tx = Eip1559TransactionRequest::new()
         .to(token_out)
         .data(approve_calldata.0)
         .gas(80_000)
-        .gas_price(total_gas_price)
+        .max_fee_per_gas(total_gas_price)
+        .max_priority_fee_per_gas(priority_fee)
         .nonce(nonce_approve);
 
     println!(
@@ -249,34 +270,56 @@ async fn execute_smart_sell(
     config: &AppConfig,
     is_panic: bool,
 ) -> anyhow::Result<TxHash> {
-    let router_abi = parse_abi(&[
-        "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external"
-    ])?;
-    let router = BaseContract::from(router_abi);
-    let path = vec![token_in, token_out];
     let deadline = U256::from(Local::now().timestamp() + 120);
 
     let send_sell = |amt: U256, gas_mult: u64| {
-        let router = router.clone();
         let client = client.clone();
-        let path = path.clone();
         let priority_fee = config.max_priority_fee_gwei;
+        let router_addr = router_addr; // Capture
+        let token_in = token_in;
+        let token_out = token_out;
 
         async move {
-            let calldata = router.encode(
-                "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                (amt, U256::zero(), path, client.address(), deadline),
-            )?;
+            // [修复] 卖出逻辑适配 Aerodrome
+            let calldata = if router_addr == *AERODROME_ROUTER {
+                let aero_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, tuple(address,address,bool,address)[] routes, address to, uint deadline) external"])?;
+                let router = BaseContract::from(aero_abi);
+                let route = (
+                    token_in,
+                    token_out,
+                    false, // stable
+                    *AERODROME_FACTORY,
+                );
+                let routes = vec![route];
+                router.encode(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                    (amt, U256::zero(), routes, client.address(), deadline),
+                )?
+            } else {
+                // 标准 V2
+                let router_abi = parse_abi(&[
+                    "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external"
+                ])?;
+                let router = BaseContract::from(router_abi);
+                let path = vec![token_in, token_out];
+                router.encode(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                    (amt, U256::zero(), path, client.address(), deadline),
+                )?
+            };
 
-            let gas_price = client.provider().get_gas_price().await?
-                + U256::from(priority_fee * 1_000_000_000 * gas_mult);
+            let base_fee = client.provider().get_gas_price().await?;
+            let prio_fee_val = U256::from(priority_fee * 1_000_000_000 * gas_mult);
+            let max_fee = base_fee + prio_fee_val;
 
-            let tx = TransactionRequest::new()
+            // [升级] 使用 EIP-1559 交易
+            let tx = Eip1559TransactionRequest::new()
                 .to(router_addr)
                 .data(calldata.0)
                 // 修复：卖出给足 Gas，防止因为逻辑复杂 OutOfGas 导致卖不出去
                 .gas(500_000)
-                .gas_price(gas_price);
+                .max_fee_per_gas(max_fee)
+                .max_priority_fee_per_gas(prio_fee_val);
 
             let pending = client.send_transaction(tx, None).await?;
             Ok::<_, anyhow::Error>(pending.tx_hash())

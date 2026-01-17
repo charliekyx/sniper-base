@@ -1,4 +1,4 @@
-use crate::constants::WETH_BASE;
+use crate::constants::{AERODROME_FACTORY, AERODROME_ROUTER, WETH_BASE};
 use anyhow::Result;
 use ethers::abi::parse_abi;
 // [修改] 引入 Ipc，去掉 Ws
@@ -81,11 +81,16 @@ impl Simulator {
         let fork_db = ForkDB::new(ethers_db);
         let mut cache_db = CacheDB::new(fork_db);
 
+        // 标准 V2 ABI
         let router_abi = parse_abi(&[
             "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,address[],address,uint) external payable",
             "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,address[],address,uint) external",
             "function getAmountsOut(uint,address[]) external view returns (uint[])"
         ])?;
+        // Aerodrome ABI (Solidly Fork)
+        // getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] routes)
+        let aero_abi = parse_abi(&["function getAmountsOut(uint,tuple(address,address,bool,address)[]) external view returns (uint[])"])?;
+
         let erc20_abi = parse_abi(&[
             "function balanceOf(address) external view returns (uint)",
             "function approve(address,uint) external returns (bool)",
@@ -118,7 +123,24 @@ impl Simulator {
         evm.env.block.number = rU256::from(block_number + 1);
 
         let path = vec![*WETH_BASE, token_out];
-        let amounts_out_calldata = router.encode("getAmountsOut", (amount_in_eth, path.clone()))?;
+
+        // [修改] 针对 Aerodrome 做特殊编码
+        let amounts_out_calldata = if router_addr == *AERODROME_ROUTER {
+            let aero_router = BaseContract::from(aero_abi);
+            // 构造 Aerodrome 的 Route 结构体: (from, to, stable, factory)
+            // stable = false (通常土狗都是非稳定币池)
+            let route = (
+                *WETH_BASE,         // from
+                token_out,          // to
+                false,              // stable
+                *AERODROME_FACTORY, // factory
+            );
+            let routes = vec![route];
+            aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
+        } else {
+            // 标准 V2
+            router.encode("getAmountsOut", (amount_in_eth, path.clone()))?
+        };
 
         evm.env.tx.caller = my_wallet;
         evm.env.tx.transact_to = TransactTo::Call(revm_router);
@@ -144,7 +166,12 @@ impl Simulator {
                 ..
             } => {
                 // 尝试解码，如果失败（比如返回空字节），则视为 0
-                router
+                let decoder = if router_addr == *AERODROME_ROUTER {
+                    BaseContract::from(parse_abi(&["function getAmountsOut(uint,tuple(address,address,bool,address)[]) external view returns (uint[])"])?)
+                } else {
+                    router.clone()
+                };
+                decoder
                     .decode_output::<Vec<U256>, _>("getAmountsOut", b)
                     .unwrap_or_default()
                     .last()
@@ -155,15 +182,35 @@ impl Simulator {
         };
 
         let deadline = U256::from(9999999999u64);
-        let buy_calldata = router.encode(
-            "swapExactETHForTokensSupportingFeeOnTransferTokens",
-            (
-                U256::zero(),
-                path.clone(),
-                Address::from(my_wallet.0 .0),
-                deadline,
-            ),
-        )?;
+
+        // [修改] 针对 Aerodrome 的买入编码
+        let buy_calldata = if router_addr == *AERODROME_ROUTER {
+            // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
+            let aero_swap_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
+            let aero_router = BaseContract::from(aero_swap_abi);
+            let route = (*WETH_BASE, token_out, false, *AERODROME_FACTORY);
+            let routes = vec![route];
+            aero_router.encode(
+                "swapExactETHForTokensSupportingFeeOnTransferTokens",
+                (
+                    U256::zero(),
+                    routes,
+                    Address::from(my_wallet.0 .0),
+                    deadline,
+                ),
+            )?
+        } else {
+            // 标准 V2
+            router.encode(
+                "swapExactETHForTokensSupportingFeeOnTransferTokens",
+                (
+                    U256::zero(),
+                    path.clone(),
+                    Address::from(my_wallet.0 .0),
+                    deadline,
+                ),
+            )?
+        };
 
         evm.env.tx.caller = my_wallet;
         evm.env.tx.transact_to = TransactTo::Call(revm_router);
@@ -232,16 +279,35 @@ impl Simulator {
         evm.transact_commit().ok();
 
         let sell_path = vec![token_out, *WETH_BASE];
-        let sell_calldata = router.encode(
-            "swapExactTokensForETHSupportingFeeOnTransferTokens",
-            (
-                token_balance,
-                U256::zero(),
-                sell_path,
-                Address::from(my_wallet.0 .0),
-                deadline,
-            ),
-        )?;
+
+        // [修改] 针对 Aerodrome 的卖出编码
+        let sell_calldata = if router_addr == *AERODROME_ROUTER {
+            let aero_sell_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,tuple(address,address,bool,address)[],address,uint) external"])?;
+            let aero_router = BaseContract::from(aero_sell_abi);
+            let route = (token_out, *WETH_BASE, false, *AERODROME_FACTORY);
+            let routes = vec![route];
+            aero_router.encode(
+                "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                (
+                    token_balance,
+                    U256::zero(),
+                    routes,
+                    Address::from(my_wallet.0 .0),
+                    deadline,
+                ),
+            )?
+        } else {
+            router.encode(
+                "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                (
+                    token_balance,
+                    U256::zero(),
+                    sell_path,
+                    Address::from(my_wallet.0 .0),
+                    deadline,
+                ),
+            )?
+        };
 
         evm.env.tx.caller = my_wallet;
         evm.env.tx.transact_to = TransactTo::Call(revm_router);

@@ -115,15 +115,15 @@ impl Simulator {
         ])?;
         // Aerodrome ABI (Solidly Fork)
         // getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] routes)
-        let aero_abi = parse_abi(&["function getAmountsOut(uint,(address,address,bool,address)[]) external view returns (uint[])"])?;
+        let aero_abi = parse_abi(&["function getAmountsOut(uint256, tuple(address,address,bool,address)[]) external view returns (uint256[])"])?;
 
         // Uniswap V3 QuoterV2 ABI
         // quoteExactInputSingle(QuoteParams params)
-        let v3_quoter_abi = parse_abi(&["function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"])?;
+        let v3_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"])?;
 
         // Uniswap V4 Quoter ABI
         // quoteExactInputSingle(QuoteExactInputSingleParams memory params)
-        let v4_quoter_abi = parse_abi(&["function quoteExactInputSingle(((address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"])?;
+        let v4_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"])?;
 
         let erc20_abi = parse_abi(&[
             "function balanceOf(address) external view returns (uint)",
@@ -388,7 +388,7 @@ impl Simulator {
         } else if is_v3 {
             // Uniswap V3 Swap: exactInputSingle(ExactInputSingleParams calldata params)
             // struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
-            let v3_router_abi = parse_abi(&["function exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
             let v3_router = BaseContract::from(v3_router_abi);
             // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
             let params = (
@@ -404,7 +404,7 @@ impl Simulator {
             v3_router.encode("exactInputSingle", (params,))?
         } else if router_addr == *AERODROME_ROUTER {
             // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
-            let aero_swap_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,(address,address,bool,address)[],address,uint) external payable"])?;
+            let aero_swap_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
             let aero_router = BaseContract::from(aero_swap_abi);
             let route = (*WETH_BASE, token_out, false, *AERODROME_FACTORY);
             let routes = vec![route];
@@ -504,7 +504,7 @@ impl Simulator {
 
         // [修改] 针对 Aerodrome 的卖出编码
         let sell_calldata = if is_v3 {
-            let v3_router_abi = parse_abi(&["function exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
             let v3_router = BaseContract::from(v3_router_abi);
             // Sell: Token -> WETH
             let params = (
@@ -519,7 +519,7 @@ impl Simulator {
             );
             v3_router.encode("exactInputSingle", (params,))?
         } else if router_addr == *AERODROME_ROUTER {
-            let aero_sell_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,(address,address,bool,address)[],address,uint) external"])?;
+            let aero_sell_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,tuple(address,address,bool,address)[],address,uint) external"])?;
             let aero_router = BaseContract::from(aero_sell_abi);
             let route = (token_out, *WETH_BASE, false, *AERODROME_FACTORY);
             let routes = vec![route];

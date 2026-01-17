@@ -131,8 +131,8 @@ fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
 
                     let c0 = pk_tuple[0].clone().into_address()?;
                     let c1 = pk_tuple[1].clone().into_address()?;
-                    let fee = pk_tuple[2].clone().into_uint()?.as_u32();
-                    let ts = pk_tuple[3].clone().into_int()?.as_u32() as i32;
+                    let fee = pk_tuple[2].clone().into_uint()?.low_u32();
+                    let ts = pk_tuple[3].clone().into_int()?.low_u32() as i32;
                     let hooks = pk_tuple[4].clone().into_address()?;
 
                     return Some((c0, c1, fee, ts, hooks));

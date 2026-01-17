@@ -7,7 +7,8 @@ mod simulation;
 use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
-    SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
+    CLANKER_FACTORY_V4, SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
+    WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -942,38 +943,56 @@ async fn process_transaction(
             );
 
             let r_name = get_router_name(&to);
-            let mut routers_to_try = vec![to];
 
-            if r_name == "Odos"
-                || r_name == "1inch"
-                || r_name == "UniversalRouter"
-                || r_name == "UniversalRouter"
-                || r_name == "Unknown"
-            {
-                if v4_pool_key.is_some() {
-                    println!("   [Strategy] Detected V4 Swap! Using Universal Router V4 logic.");
-                    routers_to_try = vec![*UNIVERSAL_ROUTER];
-                } else {
-                    println!(
-                    "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (Aerodrome, BaseSwap, AlienBase, Sushi)...",
-                    r_name, to
-                );
-                    // Add Uniswap V3 to the top of the list for Clanker
-                    // 优先顺序：Aerodrome (Base No.1) -> BaseSwap -> AlienBase -> SushiSwap
-                    routers_to_try = vec![
-                        *AERODROME_ROUTER,
-                        *BASESWAP_ROUTER,
-                        *ALIENBASE_ROUTER,
-                        *SUSHI_ROUTER,
-                    ];
-                    // If it's a Clanker token, it's likely on Uniswap V3.
-                    // We should try Uniswap V3 first or include it.
-                    // Clanker uses Uniswap V3.
-                    routers_to_try.insert(0, *UNIV3_ROUTER);
-                }
+            // [策略重构] 盲测模式：构建一个策略列表，依次尝试
+            // 结构: (Router地址, V4_PoolKey选项, 描述)
+            let mut strategies: Vec<(Address, Option<PoolKey>, String)> = Vec::new();
+
+            // 1. 优先尝试提取到的 V4 Key (如果有)
+            if let Some(pk) = v4_pool_key {
+                strategies.push((*UNIVERSAL_ROUTER, Some(pk), "Extracted V4 Key".to_string()));
             }
 
-            for router in routers_to_try {
+            // 2. 如果目标是 Universal Router 或 Unknown，尝试“盲猜” Clanker V4 配置
+            // Clanker V4 特征: Fee 1%, Tick 60, Hook = Factory
+            if r_name == "UniversalRouter" || r_name == "Unknown" {
+                let token0 = if token_addr < *WETH_BASE {
+                    token_addr
+                } else {
+                    *WETH_BASE
+                };
+                let token1 = if token_addr < *WETH_BASE {
+                    *WETH_BASE
+                } else {
+                    token_addr
+                };
+
+                let guess_key = (
+                    token0,
+                    token1,
+                    10000,               // Fee 1%
+                    60,                  // TickSpacing
+                    *CLANKER_FACTORY_V4, // Hook Guess
+                );
+                strategies.push((
+                    *UNIVERSAL_ROUTER,
+                    Some(guess_key),
+                    "Guess Clanker V4".to_string(),
+                ));
+            }
+
+            // 3. 总是尝试 Uniswap V3 (Clanker 经常兼容 V3，或者有 V3 池子)
+            strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
+
+            // 4. 尝试主流 V2 DEX (Aerodrome, BaseSwap, etc.)
+            strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
+            strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
+            strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));
+            strategies.push((*SUSHI_ROUTER, None, "SushiSwap V2".to_string()));
+
+            println!("   [Strategy] Scanning markets for liquidity...");
+
+            for (router, key, desc) in strategies {
                 effective_router = router;
                 let r_name_debug = get_router_name(&router);
                 let sim_res = simulator
@@ -983,7 +1002,7 @@ async fn process_transaction(
                         effective_router,
                         buy_amt,
                         token_addr,
-                        v4_pool_key,
+                        key, // 使用当前策略的 Key (可能是提取的，可能是猜的，也可能是 None)
                     )
                     .await;
 
@@ -993,21 +1012,25 @@ async fn process_transaction(
                         // 如果模拟成功（sim_ok = true），说明在这个路由上买入成功且有余额
                         if sim_result_tuple.0 {
                             println!(
-                                "   [Strategy] Liquidity found on {}! (Est: {})",
-                                r_name_debug, sim_result_tuple.2
+                                "   [Strategy] Liquidity found via [{}] on {}! (Est: {})",
+                                desc, r_name_debug, sim_result_tuple.2
                             );
+                            // 如果成功的是盲猜的 Key，我们需要更新 v4_pool_key 以便后续交易使用
+                            if key.is_some() {
+                                v4_pool_key = key;
+                            }
                             break;
                         } else {
                             // [新增] 打印失败原因，方便调试
                             println!(
-                                "   [Debug] Tried {} -> Failed: {}",
-                                r_name_debug, sim_result_tuple.3
+                                "   [Debug] Tried [{}] -> Failed: {}",
+                                desc, sim_result_tuple.3
                             );
                         }
                     }
                     Err(e) => {
                         // 记录错误但继续尝试下一个
-                        println!("   [Debug] Tried {} -> Error: {:?}", r_name_debug, e);
+                        println!("   [Debug] Tried [{}] -> Error: {:?}", desc, e);
                         sim_result_tuple = (
                             false,
                             U256::zero(),

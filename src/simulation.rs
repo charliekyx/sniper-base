@@ -1,5 +1,6 @@
 use crate::constants::{
-    AERODROME_FACTORY, AERODROME_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, WETH_BASE,
+    AERODROME_FACTORY, AERODROME_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER,
+    UNIVERSAL_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
 use ethers::abi::{parse_abi, ParamType};
@@ -242,6 +243,17 @@ impl Simulator {
             let routes = vec![route];
             aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
         } else {
+            // [修复] 如果是 Universal Router 且没有 PoolKey，直接报错，不要尝试调用 V2 方法
+            if router_addr == *UNIVERSAL_ROUTER {
+                return Ok((
+                    false,
+                    U256::zero(),
+                    U256::zero(),
+                    "Universal Router requires PoolKey".to_string(),
+                    0,
+                    0,
+                ));
+            }
             // 标准 V2
             router.encode("getAmountsOut", (amount_in_eth, path.clone()))?
         };

@@ -16,6 +16,8 @@ lazy_static! {
     // Uniswap V4 (Base)
     pub static ref UNIV4_POOL_MANAGER: Address = Address::from_str("0x498581fF718922c3f8e6A244956aF099B2652b2b").unwrap();
     pub static ref UNIV4_QUOTER: Address = Address::from_str("0x0d5e0f971ed27fbff6c2837bf31316121532048d").unwrap();
+    // Clanker V4 Factory (Used as Hook guess)
+    pub static ref CLANKER_FACTORY_V4: Address = Address::from_str("0xea8127533F7be6d04b3DBA8f0a496F2DCfd27728").unwrap();
 
     pub static ref AERODROME_FACTORY: Address = Address::from_str("0x420DD381b31aEf6683db6B902084cB0FFECe40Da").unwrap();
     pub static ref SUSHI_ROUTER: Address = Address::from_str("0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891").unwrap();

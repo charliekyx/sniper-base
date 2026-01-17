@@ -139,6 +139,11 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             // 如果输出是 ETH，那就是卖出，返回输入 Token
             return Some(("Sell_Odos".to_string(), token_in));
         }
+    } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
+        // Uniswap Universal Router: execute(bytes,bytes[],uint256) or execute(bytes,bytes[])
+        // 这是一个聚合路由，输入数据很复杂。
+        // 我们返回一个标记，具体的 Token 地址交给后续的 Simulator (scan_tx_for_token_in) 去从日志中提取。
+        return Some(("Universal_Interaction".to_string(), Address::zero()));
     }
     None
 }
@@ -542,7 +547,7 @@ async fn process_transaction(
         let decoded = decode_router_input(&tx.input);
 
         // [修改] 智能识别逻辑：解码 -> 失败则模拟 -> 最终判定
-        let (action, token_addr) = if let Some((act, tok)) = decoded {
+        let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {
             (act, tok)
         } else if is_from_target {
             // 如果解码失败，启动模拟扫描
@@ -565,6 +570,16 @@ async fn process_transaction(
         } else {
             return;
         };
+
+        // [新增] 如果是 Universal Router (Address::zero())，强制进行模拟以获取真实的 Token 地址
+        if token_addr == Address::zero() && action == "Universal_Interaction" {
+            if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
+                token_addr = token;
+                action = "Auto_Buy_Universal".to_string();
+            } else {
+                return; // 模拟也没发现代币流入（可能是卖出或失败），跳过
+            }
+        }
 
         if true {
             // 保持原有缩进结构，实际逻辑已在上面处理

@@ -15,7 +15,10 @@ lazy_static! {
     pub static ref SUSHI_ROUTER: Address = Address::from_str("0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891").unwrap();
     pub static ref ONEINCH_ROUTER: Address = Address::from_str("0x1111111254fb6c44bac0bed2854e76f90643097d").unwrap();
     pub static ref ODOS_ROUTER: Address = Address::from_str("0x8d0d118070b728e104294471fbe93c2e3affd694").unwrap();
-    pub static ref UNIVERSAL_ROUTER: Address = Address::from_str("0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD").unwrap();
+    // Base Chain Universal Router
+    pub static ref UNIVERSAL_ROUTER: Address = Address::from_str("0x743f2f29cdd66242fb27d292ab2cc92f45674635").unwrap();
+    // deBridge Gate
+    pub static ref DEBRIDGE_ROUTER: Address = Address::from_str("0x663dc15d3c1ac63ff12e45ab68fea3f0a883c251").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {
@@ -28,6 +31,7 @@ lazy_static! {
         m.insert(*ONEINCH_ROUTER, "1inch".to_string());
         m.insert(*ODOS_ROUTER, "Odos".to_string());
         m.insert(*UNIVERSAL_ROUTER, "UniversalRouter".to_string());
+        m.insert(*DEBRIDGE_ROUTER, "deBridge".to_string());
         m
     };
 }

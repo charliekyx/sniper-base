@@ -5,7 +5,7 @@ mod persistence;
 mod simulation;
 
 use crate::config::AppConfig;
-use crate::constants::{get_router_name, WETH_BASE};
+use crate::constants::{get_router_name, BASESWAP_ROUTER, WETH_BASE};
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
     init_storage, load_all_positions, remove_position, save_position, PositionData,
@@ -567,6 +567,21 @@ async fn process_transaction(
             log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 
+            // [新增] 路由回退逻辑：如果目标使用的是聚合器或未知合约，强制使用 BaseSwap (V2)
+            let mut effective_router = to;
+            let r_name = get_router_name(&to);
+            if r_name == "Odos"
+                || r_name == "1inch"
+                || r_name == "UniversalRouter"
+                || r_name == "Unknown"
+            {
+                println!(
+                    "   [Strategy] Target uses {} ({:?}). Switching to BaseSwap for V2 execution.",
+                    r_name, to
+                );
+                effective_router = *BASESWAP_ROUTER;
+            }
+
             if config.sniper_block_delay > 0 && !config.shadow_mode {
                 let target_block = provider.get_block_number().await.unwrap_or_default()
                     + config.sniper_block_delay;
@@ -579,7 +594,13 @@ async fn process_transaction(
             }
 
             let sim_res = simulator
-                .simulate_bundle(client.address(), None, to, buy_amt, token_addr)
+                .simulate_bundle(
+                    client.address(),
+                    None,
+                    effective_router,
+                    buy_amt,
+                    token_addr,
+                )
                 .await;
 
             let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = sim_res.unwrap_or((
@@ -626,7 +647,7 @@ async fn process_transaction(
                     println!("   [Shadow] Starting virtual monitor for {:?}", token_addr);
                     task::spawn(monitor_position(
                         client.clone(),
-                        to,
+                        effective_router,
                         token_addr,
                         buy_amt,
                         config.clone(),
@@ -657,7 +678,7 @@ async fn process_transaction(
             match execute_buy_and_approve(
                 client.clone(),
                 nonce_manager,
-                to,
+                effective_router,
                 *WETH_BASE,
                 token_addr,
                 buy_amt,
@@ -674,14 +695,14 @@ async fn process_transaction(
                     ));
                     let pos_data = PositionData {
                         token_address: token_addr,
-                        router_address: to,
+                        router_address: effective_router,
                         initial_cost_eth: buy_amt,
                         timestamp: Local::now().timestamp() as u64,
                     };
                     let _ = save_position(&pos_data);
                     task::spawn(monitor_position(
                         client,
-                        to,
+                        effective_router,
                         token_addr,
                         buy_amt,
                         config,

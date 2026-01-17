@@ -329,7 +329,7 @@ async fn execute_buy_and_approve(
         router.encode("execute", (Bytes::from(commands), inputs, deadline))?
     } else if router_addr == *UNIV3_ROUTER {
         // Uniswap V3
-        let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+        let v3_abi = parse_abi(&["function exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
         let router = BaseContract::from(v3_abi);
         // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
         let params = (
@@ -344,7 +344,7 @@ async fn execute_buy_and_approve(
         );
         router.encode("exactInputSingle", (params,))?
     } else if router_addr == *AERODROME_ROUTER {
-        let aero_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
+        let aero_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,(address,address,bool,address)[],address,uint) external payable"])?;
         let router = BaseContract::from(aero_abi);
         let route = (
             token_in,
@@ -501,7 +501,7 @@ async fn execute_smart_sell(
                 ])?);
                 router.encode("execute", (Bytes::from(commands), inputs, deadline))?
             } else if router_addr == *UNIV3_ROUTER {
-                let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+                let v3_abi = parse_abi(&["function exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
                 let router = BaseContract::from(v3_abi);
                 // Sell: Token -> WETH
                 let params = (
@@ -516,7 +516,7 @@ async fn execute_smart_sell(
                 );
                 router.encode("exactInputSingle", (params,))?
             } else if router_addr == *AERODROME_ROUTER {
-                let aero_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, tuple(address,address,bool,address)[] routes, address to, uint deadline) external"])?;
+                let aero_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, (address,address,bool,address)[] routes, address to, uint deadline) external"])?;
                 let router = BaseContract::from(aero_abi);
                 let route = (
                     token_in,
@@ -605,10 +605,10 @@ async fn monitor_position(
     let router_contract = Contract::new(router_addr, router_abi, client.clone());
 
     // V4 Quoter
-    let v4_quoter = Contract::new(*UNIV4_QUOTER, parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"]).unwrap(), client.clone());
+    let v4_quoter = Contract::new(*UNIV4_QUOTER, parse_abi(&["function quoteExactInputSingle(((address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"]).unwrap(), client.clone());
 
     // V3 Quoter
-    let quoter_contract = Contract::new(*UNIV3_QUOTER, parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"]).unwrap(), client.clone());
+    let quoter_contract = Contract::new(*UNIV3_QUOTER, parse_abi(&["function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"]).unwrap(), client.clone());
     let path = vec![token_addr, *WETH_BASE];
 
     let mut sold_half = false;

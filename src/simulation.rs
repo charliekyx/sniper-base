@@ -3,7 +3,7 @@ use crate::constants::{
     UNIVERSAL_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
-use ethers::abi::{parse_abi, ParamType};
+use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability};
 // [修改] 引入 Ipc，去掉 Ws
 use ethers::prelude::{BaseContract, Ipc, Middleware, Provider};
 use ethers::types::{Address, Bytes, Transaction, U256};
@@ -107,23 +107,107 @@ impl Simulator {
         let fork_db = ForkDB::new(ethers_db);
         let mut cache_db = CacheDB::new(fork_db);
 
-        // 标准 V2 ABI
+        // =========================================================================
+        // [根本解决方案] 手动构建 ABI，绕过字符串解析器的 Bug
+        // =========================================================================
+
+        // 1. Aerodrome ABI: getAmountsOut(uint amountIn, Route[] routes)
+        // Route Struct: (address from, address to, bool stable, address factory)
+        let route_struct_type = ParamType::Tuple(vec![
+            ParamType::Address, // from
+            ParamType::Address, // to
+            ParamType::Bool,    // stable
+            ParamType::Address, // factory
+        ]);
+
+        #[allow(deprecated)]
+        let aero_function = Function {
+            name: "getAmountsOut".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountIn".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "routes".to_string(),
+                    kind: ParamType::Array(Box::new(route_struct_type.clone())), // 明确指定这是 Struct 数组
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![Param {
+                name: "amounts".to_string(),
+                kind: ParamType::Array(Box::new(ParamType::Uint(256))),
+                internal_type: None,
+            }],
+            constant: Some(true),
+            state_mutability: StateMutability::View,
+        };
+
+        let mut aero_abi = Abi::default();
+        aero_abi
+            .functions
+            .insert("getAmountsOut".to_string(), vec![aero_function]);
+
+        // 2. Uniswap V3 Quoter ABI: quoteExactInputSingle(QuoteParams params)
+        // QuoteParams: (tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96)
+        let v3_params_type = ParamType::Tuple(vec![
+            ParamType::Address,   // tokenIn
+            ParamType::Address,   // tokenOut
+            ParamType::Uint(256), // amountIn
+            ParamType::Uint(24),  // fee
+            ParamType::Uint(160), // sqrtPriceLimitX96
+        ]);
+
+        #[allow(deprecated)]
+        let v3_function = Function {
+            name: "quoteExactInputSingle".to_string(),
+            inputs: vec![Param {
+                name: "params".to_string(),
+                kind: v3_params_type, // 明确指定这是 Struct (Tuple)
+                internal_type: None,
+            }],
+            outputs: vec![
+                Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "sqrtPriceX96After".to_string(),
+                    kind: ParamType::Uint(160),
+                    internal_type: None,
+                },
+                Param {
+                    name: "initializedTicksCrossed".to_string(),
+                    kind: ParamType::Uint(32),
+                    internal_type: None,
+                },
+                Param {
+                    name: "gasEstimate".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            constant: None,
+            state_mutability: StateMutability::NonPayable,
+        };
+
+        let mut v3_quoter_abi = Abi::default();
+        v3_quoter_abi
+            .functions
+            .insert("quoteExactInputSingle".to_string(), vec![v3_function]);
+
+        // 3. Uniswap V4 Quoter ABI (保持 parse_abi 或照样改写，V4 暂时不是报错重点，可以用 parse_abi 兼容)
+        // 如果 V4 也报错，请告诉我，我们用同样的方法改写。目前先保留原来的字符串解析，只要加上 tuple
+        let v4_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"])?;
+
+        // 4. 标准 V2 和 ERC20 比较简单，不容易出错，保持原样即可
         let router_abi = parse_abi(&[
             "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,address[],address,uint) external payable",
             "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,address[],address,uint) external",
             "function getAmountsOut(uint,address[]) external view returns (uint[])"
         ])?;
-        // Aerodrome ABI (Solidly Fork)
-        // getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] routes)
-        let aero_abi = parse_abi(&["function getAmountsOut(uint256, tuple(address,address,bool,address)[]) external view returns (uint256[])"])?;
-
-        // Uniswap V3 QuoterV2 ABI
-        // quoteExactInputSingle(QuoteParams params)
-        let v3_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"])?;
-
-        // Uniswap V4 Quoter ABI
-        // quoteExactInputSingle(QuoteExactInputSingleParams memory params)
-        let v4_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"])?;
 
         let erc20_abi = parse_abi(&[
             "function balanceOf(address) external view returns (uint)",
@@ -388,8 +472,38 @@ impl Simulator {
         } else if is_v3 {
             // Uniswap V3 Swap: exactInputSingle(ExactInputSingleParams calldata params)
             // struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
-            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
-            let v3_router = BaseContract::from(v3_router_abi);
+            let v3_swap_params_type = ParamType::Tuple(vec![
+                ParamType::Address,   // tokenIn
+                ParamType::Address,   // tokenOut
+                ParamType::Uint(24),  // fee
+                ParamType::Address,   // recipient
+                ParamType::Uint(256), // deadline
+                ParamType::Uint(256), // amountIn
+                ParamType::Uint(256), // amountOutMinimum
+                ParamType::Uint(160), // sqrtPriceLimitX96
+            ]);
+            #[allow(deprecated)]
+            let v3_swap_func = Function {
+                name: "exactInputSingle".to_string(),
+                inputs: vec![Param {
+                    name: "params".to_string(),
+                    kind: v3_swap_params_type,
+                    internal_type: None,
+                }],
+                outputs: vec![Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: None,
+                state_mutability: StateMutability::Payable,
+            };
+            let mut v3_swap_abi = Abi::default();
+            v3_swap_abi
+                .functions
+                .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+            let v3_router = BaseContract::from(v3_swap_abi);
+
             // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
             let params = (
                 *WETH_BASE,
@@ -404,7 +518,40 @@ impl Simulator {
             v3_router.encode("exactInputSingle", (params,))?
         } else if router_addr == *AERODROME_ROUTER {
             // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
-            let aero_swap_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
+            #[allow(deprecated)]
+            let aero_swap_func = Function {
+                name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "amountOutMin".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "routes".to_string(),
+                        kind: ParamType::Array(Box::new(route_struct_type.clone())),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "to".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "deadline".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![],
+                constant: None,
+                state_mutability: StateMutability::Payable,
+            };
+            let mut aero_swap_abi = Abi::default();
+            aero_swap_abi.functions.insert(
+                "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+                vec![aero_swap_func],
+            );
             let aero_router = BaseContract::from(aero_swap_abi);
             let route = (*WETH_BASE, token_out, false, *AERODROME_FACTORY);
             let routes = vec![route];
@@ -504,8 +651,37 @@ impl Simulator {
 
         // [修改] 针对 Aerodrome 的卖出编码
         let sell_calldata = if is_v3 {
-            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
-            let v3_router = BaseContract::from(v3_router_abi);
+            let v3_swap_params_type = ParamType::Tuple(vec![
+                ParamType::Address,   // tokenIn
+                ParamType::Address,   // tokenOut
+                ParamType::Uint(24),  // fee
+                ParamType::Address,   // recipient
+                ParamType::Uint(256), // deadline
+                ParamType::Uint(256), // amountIn
+                ParamType::Uint(256), // amountOutMinimum
+                ParamType::Uint(160), // sqrtPriceLimitX96
+            ]);
+            #[allow(deprecated)]
+            let v3_swap_func = Function {
+                name: "exactInputSingle".to_string(),
+                inputs: vec![Param {
+                    name: "params".to_string(),
+                    kind: v3_swap_params_type,
+                    internal_type: None,
+                }],
+                outputs: vec![Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: None,
+                state_mutability: StateMutability::Payable,
+            };
+            let mut v3_swap_abi = Abi::default();
+            v3_swap_abi
+                .functions
+                .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+            let v3_router = BaseContract::from(v3_swap_abi);
             // Sell: Token -> WETH
             let params = (
                 token_out,
@@ -519,7 +695,45 @@ impl Simulator {
             );
             v3_router.encode("exactInputSingle", (params,))?
         } else if router_addr == *AERODROME_ROUTER {
-            let aero_sell_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,tuple(address,address,bool,address)[],address,uint) external"])?;
+            #[allow(deprecated)]
+            let aero_sell_func = Function {
+                name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "amountIn".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "amountOutMin".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "routes".to_string(),
+                        kind: ParamType::Array(Box::new(route_struct_type.clone())),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "to".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "deadline".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![],
+                constant: None,
+                state_mutability: StateMutability::NonPayable,
+            };
+            let mut aero_sell_abi = Abi::default();
+            aero_sell_abi.functions.insert(
+                "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                vec![aero_sell_func],
+            );
             let aero_router = BaseContract::from(aero_sell_abi);
             let route = (token_out, *WETH_BASE, false, *AERODROME_FACTORY);
             let routes = vec![route];

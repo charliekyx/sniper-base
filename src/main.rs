@@ -17,7 +17,7 @@ use crate::persistence::{
 use crate::simulation::Simulator;
 use chrono::Local;
 use dotenv::dotenv;
-use ethers::abi::{parse_abi, Token};
+use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability, Token};
 use ethers::prelude::*;
 use ethers::providers::{Ipc, Middleware};
 use std::collections::HashSet;
@@ -330,8 +330,37 @@ async fn execute_buy_and_approve(
         router.encode("execute", (Bytes::from(commands), inputs, deadline))?
     } else if router_addr == *UNIV3_ROUTER {
         // Uniswap V3
-        let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
-        let router = BaseContract::from(v3_abi);
+        let v3_swap_params_type = ParamType::Tuple(vec![
+            ParamType::Address,   // tokenIn
+            ParamType::Address,   // tokenOut
+            ParamType::Uint(24),  // fee
+            ParamType::Address,   // recipient
+            ParamType::Uint(256), // deadline
+            ParamType::Uint(256), // amountIn
+            ParamType::Uint(256), // amountOutMinimum
+            ParamType::Uint(160), // sqrtPriceLimitX96
+        ]);
+        #[allow(deprecated)]
+        let v3_swap_func = Function {
+            name: "exactInputSingle".to_string(),
+            inputs: vec![Param {
+                name: "params".to_string(),
+                kind: v3_swap_params_type,
+                internal_type: None,
+            }],
+            outputs: vec![Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            }],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        let mut v3_swap_abi = Abi::default();
+        v3_swap_abi
+            .functions
+            .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+        let router = BaseContract::from(v3_swap_abi);
         // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
         let params = (
             *WETH_BASE,
@@ -345,8 +374,47 @@ async fn execute_buy_and_approve(
         );
         router.encode("exactInputSingle", (params,))?
     } else if router_addr == *AERODROME_ROUTER {
-        let aero_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
-        let router = BaseContract::from(aero_abi);
+        let route_struct_type = ParamType::Tuple(vec![
+            ParamType::Address, // from
+            ParamType::Address, // to
+            ParamType::Bool,    // stable
+            ParamType::Address, // factory
+        ]);
+        #[allow(deprecated)]
+        let aero_swap_func = Function {
+            name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountOutMin".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "routes".to_string(),
+                    kind: ParamType::Array(Box::new(route_struct_type)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "to".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "deadline".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        let mut aero_swap_abi = Abi::default();
+        aero_swap_abi.functions.insert(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            vec![aero_swap_func],
+        );
+        let router = BaseContract::from(aero_swap_abi);
         let route = (
             token_in,
             token_out,
@@ -502,8 +570,37 @@ async fn execute_smart_sell(
                 ])?);
                 router.encode("execute", (Bytes::from(commands), inputs, deadline))?
             } else if router_addr == *UNIV3_ROUTER {
-                let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
-                let router = BaseContract::from(v3_abi);
+                let v3_swap_params_type = ParamType::Tuple(vec![
+                    ParamType::Address,   // tokenIn
+                    ParamType::Address,   // tokenOut
+                    ParamType::Uint(24),  // fee
+                    ParamType::Address,   // recipient
+                    ParamType::Uint(256), // deadline
+                    ParamType::Uint(256), // amountIn
+                    ParamType::Uint(256), // amountOutMinimum
+                    ParamType::Uint(160), // sqrtPriceLimitX96
+                ]);
+                #[allow(deprecated)]
+                let v3_swap_func = Function {
+                    name: "exactInputSingle".to_string(),
+                    inputs: vec![Param {
+                        name: "params".to_string(),
+                        kind: v3_swap_params_type,
+                        internal_type: None,
+                    }],
+                    outputs: vec![Param {
+                        name: "amountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    }],
+                    constant: None,
+                    state_mutability: StateMutability::Payable,
+                };
+                let mut v3_swap_abi = Abi::default();
+                v3_swap_abi
+                    .functions
+                    .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+                let router = BaseContract::from(v3_swap_abi);
                 // Sell: Token -> WETH
                 let params = (
                     token_in,
@@ -517,8 +614,52 @@ async fn execute_smart_sell(
                 );
                 router.encode("exactInputSingle", (params,))?
             } else if router_addr == *AERODROME_ROUTER {
-                let aero_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, tuple(address,address,bool,address)[] routes, address to, uint deadline) external"])?;
-                let router = BaseContract::from(aero_abi);
+                let route_struct_type = ParamType::Tuple(vec![
+                    ParamType::Address, // from
+                    ParamType::Address, // to
+                    ParamType::Bool,    // stable
+                    ParamType::Address, // factory
+                ]);
+                #[allow(deprecated)]
+                let aero_sell_func = Function {
+                    name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "amountIn".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amountOutMin".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "routes".to_string(),
+                            kind: ParamType::Array(Box::new(route_struct_type)),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "to".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "deadline".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![],
+                    constant: None,
+                    state_mutability: StateMutability::NonPayable,
+                };
+                let mut aero_sell_abi = Abi::default();
+                aero_sell_abi.functions.insert(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                    vec![aero_sell_func],
+                );
+                let router = BaseContract::from(aero_sell_abi);
                 let route = (
                     token_in,
                     token_out,

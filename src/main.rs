@@ -470,7 +470,33 @@ async fn process_transaction(
         let router_name = get_router_name(&to);
         let decoded = decode_router_input(&tx.input);
 
-        if let Some((action, token_addr)) = decoded {
+        // [修改] 智能识别逻辑：解码 -> 失败则模拟 -> 最终判定
+        let (action, token_addr) = if let Some((act, tok)) = decoded {
+            (act, tok)
+        } else if is_from_target {
+            // 如果解码失败，启动模拟扫描
+            if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
+                ("Auto_Buy".to_string(), token)
+            } else {
+                // 确实无法识别，打印日志并跳过
+                let selector = if tx.input.len() >= 4 {
+                    ethers::utils::hex::encode(&tx.input[0..4])
+                } else {
+                    "0x".to_string()
+                };
+                let input_preview = ethers::utils::hex::encode(&tx.input);
+                log_to_file(format!(
+                    "   [SKIP] Could not decode input for target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
+                    to, selector, tx.input.len(), input_preview
+                ));
+                return;
+            }
+        } else {
+            return;
+        };
+
+        if true {
+            // 保持原有缩进结构，实际逻辑已在上面处理
             if is_from_target && router_name == "Unknown" {
                 println!(
                     "   [DEBUG] Target interacted with unknown router/contract: {:?}",
@@ -487,6 +513,11 @@ async fn process_transaction(
                     "   [MATCH] Action: {} | Token: {:?}",
                     action, token_addr
                 ));
+            }
+
+            if action == "Approve" {
+                // 忽略授权交易，减少日志噪音
+                return;
             }
 
             if router_name == "Unknown" && action != "AddLiquidity" {
@@ -517,7 +548,7 @@ async fn process_transaction(
             // 允许 Swap_Token->Token，因为很多高手用 USDC/WETH 买入
             let is_target_buy = config.copy_trade_enabled
                 && is_from_target
-                && (action.contains("Buy") || action.contains("Swap"));
+                && (action.contains("Buy") || action.contains("Swap") || action == "Auto_Buy");
             let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
 
             if !is_target_buy && !is_new_liquidity {
@@ -662,18 +693,6 @@ async fn process_transaction(
                     cleanup(token_addr);
                 }
             }
-        } else if is_from_target {
-            // 捕获无法解析的目标交易，并打印 Input 数据以便调试
-            let selector = if tx.input.len() >= 4 {
-                ethers::utils::hex::encode(&tx.input[0..4])
-            } else {
-                "0x".to_string()
-            };
-            let input_preview = ethers::utils::hex::encode(&tx.input);
-            log_to_file(format!(
-                "   [SKIP] Could not decode input for target tx to {:?} | Selector: 0x{} | InputLen: {} | Data: {}",
-                to, selector, tx.input.len(), input_preview
-            ));
         }
     }
 }

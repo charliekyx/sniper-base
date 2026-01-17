@@ -13,6 +13,7 @@ use revm::{
     Database, EVM,
 };
 use std::cell::RefCell;
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -287,6 +288,71 @@ impl Simulator {
                 "Sellable but Loss".to_string(),
                 gas_used,
             ))
+        }
+    }
+
+    // [新增] 自动扫描交易意图：不管 Input 是什么，只要模拟执行后发现目标收到了 Token，就认为是买入
+    pub async fn scan_tx_for_token_in(&self, tx: Transaction) -> Result<Option<Address>> {
+        let block_number = self.provider.get_block_number().await?.as_u64();
+
+        // 创建临时的 EthersDB 用于此次模拟
+        let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
+            .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
+
+        let fork_db = ForkDB::new(ethers_db);
+        let mut cache_db = CacheDB::new(fork_db);
+
+        let mut evm = EVM {
+            env: Default::default(),
+            db: Some(&mut cache_db),
+        };
+
+        evm.env.cfg.chain_id = 8453;
+        evm.env.block.number = rU256::from(block_number + 1);
+
+        // 构造模拟交易环境
+        evm.env.tx.caller = rAddress::from(tx.from.0);
+        if let Some(to) = tx.to {
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(to.0));
+        } else {
+            return Ok(None);
+        }
+        evm.env.tx.data = tx.input.0.into();
+        evm.env.tx.value = rU256::from_limbs(tx.value.0);
+        evm.env.tx.gas_limit = tx.gas.as_u64();
+        if let Some(gp) = tx.gas_price {
+            evm.env.tx.gas_price = rU256::from_limbs(gp.0);
+        }
+
+        // 执行交易并检查日志
+        match evm.transact_commit() {
+            Ok(ExecutionResult::Success { logs, .. }) => {
+                // Transfer 事件签名: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+                let transfer_sig = rB256::from_str(
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                )
+                .unwrap();
+                // 构造目标地址的 Topic (补齐 32 字节)
+                let mut topic_bytes = [0u8; 32];
+                topic_bytes[12..32].copy_from_slice(&tx.from.0);
+                let target_topic = rB256::from(topic_bytes);
+
+                for log in logs {
+                    // Transfer(from, to, value) 有 3 个 topic: [Sig, From, To]
+                    if log.topics.len() == 3 && log.topics[0] == transfer_sig {
+                        // 检查 Topic[2] (To) 是否是目标钱包
+                        if log.topics[2] == target_topic {
+                            let token_addr = Address::from(log.address.0 .0);
+                            // 排除 WETH (因为 WETH 经常作为中间跳板)
+                            if token_addr != *WETH_BASE {
+                                return Ok(Some(token_addr));
+                            }
+                        }
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
         }
     }
 }

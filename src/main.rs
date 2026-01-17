@@ -7,7 +7,7 @@ mod simulation;
 use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
-    SUSHI_ROUTER, WETH_BASE,
+    SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -139,6 +139,27 @@ fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             // 如果输出是 ETH，那就是卖出，返回输入 Token
             return Some(("Sell_Odos".to_string(), token_in));
         }
+    } else if sig == [0x41, 0x4b, 0xf3, 0x89] {
+        // Uniswap V3: exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))
+        // Struct in calldata: tokenIn(0), tokenOut(32), fee(64), ...
+        // Offset 4 + 32 = 36.
+        return read_address(36).map(|t| ("Buy_V3_Single".to_string(), t));
+    } else if sig == [0xc0, 0x4b, 0x8d, 0x59] {
+        // Uniswap V3: exactInput((bytes path, address recipient, uint256 deadline, uint256 amountIn, uint256 amountOutMinimum))
+        // Path is encoded as: tokenIn (20) + fee (3) + tokenOut (20) ...
+        let offset_ptr = 4;
+        let path_offset = read_usize(offset_ptr)?;
+        let len_ptr = 4 + path_offset;
+        let path_len = read_usize(len_ptr)?;
+        if path_len < 20 {
+            return None;
+        }
+        let path_start = len_ptr + 32;
+        let token_out_start = path_start + path_len - 20;
+        return Some((
+            "Buy_V3_Multi".to_string(),
+            Address::from_slice(&input[token_out_start..token_out_start + 20]),
+        ));
     } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
         // Uniswap Universal Router: execute(bytes,bytes[],uint256) or execute(bytes,bytes[])
         // 这是一个聚合路由，输入数据很复杂。
@@ -159,6 +180,7 @@ async fn execute_buy_and_approve(
     amount_in: U256,
     amount_out_min: U256,
     config: &AppConfig,
+    fee: u32, // Added fee for V3
 ) -> anyhow::Result<()> {
     println!(
         ">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...",
@@ -171,7 +193,23 @@ async fn execute_buy_and_approve(
     let deadline = U256::from(Local::now().timestamp() + 60);
 
     // [修改] 实盘交易适配 Aerodrome
-    let calldata = if router_addr == *AERODROME_ROUTER {
+    let calldata = if router_addr == *UNIV3_ROUTER {
+        // Uniswap V3
+        let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+        let router = BaseContract::from(v3_abi);
+        // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
+        let params = (
+            *WETH_BASE,
+            token_out,
+            fee,
+            client.address(),
+            deadline,
+            amount_in,
+            amount_out_min,
+            U256::zero(),
+        );
+        router.encode("exactInputSingle", (params,))?
+    } else if router_addr == *AERODROME_ROUTER {
         let aero_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
         let router = BaseContract::from(aero_abi);
         let route = (
@@ -274,6 +312,7 @@ async fn execute_smart_sell(
     amount_token: U256,
     config: &AppConfig,
     is_panic: bool,
+    fee: u32, // Added fee for V3
 ) -> anyhow::Result<TxHash> {
     let deadline = U256::from(Local::now().timestamp() + 120);
 
@@ -286,7 +325,22 @@ async fn execute_smart_sell(
 
         async move {
             // [修复] 卖出逻辑适配 Aerodrome
-            let calldata = if router_addr == *AERODROME_ROUTER {
+            let calldata = if router_addr == *UNIV3_ROUTER {
+                let v3_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+                let router = BaseContract::from(v3_abi);
+                // Sell: Token -> WETH
+                let params = (
+                    token_in,
+                    token_out,
+                    fee,
+                    client.address(),
+                    deadline,
+                    amt,
+                    U256::zero(),
+                    U256::zero(),
+                );
+                router.encode("exactInputSingle", (params,))?
+            } else if router_addr == *AERODROME_ROUTER {
                 let aero_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, tuple(address,address,bool,address)[] routes, address to, uint deadline) external"])?;
                 let router = BaseContract::from(aero_abi);
                 let route = (
@@ -360,16 +414,22 @@ async fn monitor_position(
     config: AppConfig,
     processing_locks: Arc<Mutex<HashSet<Address>>>,
     initial_simulated_tokens: Option<U256>, // [新增] 用于影子模式的虚拟持仓
+    fee: u32,                               // Added fee for V3
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
     // 修复：使用 expect/match 替代 unwrap，防止 panic
     let erc20_abi = parse_abi(&["function balanceOf(address) external view returns (uint)"])
         .expect("ABI Parse Error");
     let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
+
+    // V2 Router
     let router_abi =
         parse_abi(&["function getAmountsOut(uint,address[]) external view returns (uint[])"])
             .expect("ABI Parse Error");
     let router_contract = Contract::new(router_addr, router_abi, client.clone());
+
+    // V3 Quoter
+    let quoter_contract = Contract::new(*UNIV3_QUOTER, parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"]).unwrap(), client.clone());
     let path = vec![token_addr, *WETH_BASE];
 
     let mut sold_half = false;
@@ -414,10 +474,24 @@ async fn monitor_position(
             break;
         }
 
-        let amounts_out: Vec<U256> =
-            match router_contract.method("getAmountsOut", (balance, path.clone())) {
+        let current_val = if router_addr == *UNIV3_ROUTER {
+            // V3 Price Check
+            let params = (token_addr, *WETH_BASE, balance, fee, U256::zero());
+            match quoter_contract
+                .method::<(Address, Address, U256, u32, U256), (U256, U256, u32, U256)>(
+                    "quoteExactInputSingle",
+                    params,
+                ) {
                 Ok(m) => match m.call().await {
-                    Ok(v) => v,
+                    Ok((amount_out, _, _, _)) => amount_out,
+                    Err(_) => U256::zero(),
+                },
+                Err(_) => U256::zero(),
+            }
+        } else {
+            match router_contract.method::<_, Vec<U256>>("getAmountsOut", (balance, path.clone())) {
+                Ok(m) => match m.call().await {
+                    Ok(v) => *v.last().unwrap_or(&U256::zero()),
                     Err(_) => {
                         sleep(Duration::from_millis(500)).await;
                         continue;
@@ -427,9 +501,8 @@ async fn monitor_position(
                     sleep(Duration::from_millis(500)).await;
                     continue;
                 }
-            };
-
-        let current_val = *amounts_out.last().unwrap_or(&U256::zero());
+            }
+        };
 
         let mut trigger_sell = false;
         let mut is_panic = false;
@@ -490,6 +563,7 @@ async fn monitor_position(
                     sell_amount,
                     &config,
                     is_panic,
+                    fee,
                 )
                 .await;
                 // 实盘卖出后释放锁
@@ -560,7 +634,7 @@ async fn process_transaction(
                 } else {
                     "0x".to_string()
                 };
-                let input_preview = ethers::utils::hex::encode(&tx.input);
+                let _input_preview = ethers::utils::hex::encode(&tx.input);
                 log_to_file(format!(
                     "   [IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {}",
                     to, selector, tx.input.len()
@@ -661,7 +735,14 @@ async fn process_transaction(
 
             // [策略升级] 多路由扫描：如果目标使用聚合器，轮询主流 V2 DEX 直到找到流动性
             let mut effective_router = to;
-            let mut sim_result_tuple = (false, U256::zero(), U256::zero(), "Init".to_string(), 0);
+            let mut sim_result_tuple = (
+                false,
+                U256::zero(),
+                U256::zero(),
+                "Init".to_string(),
+                0,
+                0u32,
+            );
 
             let r_name = get_router_name(&to);
             let mut routers_to_try = vec![to];
@@ -669,12 +750,14 @@ async fn process_transaction(
             if r_name == "Odos"
                 || r_name == "1inch"
                 || r_name == "UniversalRouter"
+                || r_name == "UniversalRouter"
                 || r_name == "Unknown"
             {
                 println!(
                     "   [Strategy] Target uses {} ({:?}). Scanning V2 DEXes (Aerodrome, BaseSwap, AlienBase, Sushi)...",
                     r_name, to
                 );
+                // Add Uniswap V3 to the top of the list for Clanker
                 // 优先顺序：Aerodrome (Base No.1) -> BaseSwap -> AlienBase -> SushiSwap
                 routers_to_try = vec![
                     *AERODROME_ROUTER,
@@ -682,6 +765,10 @@ async fn process_transaction(
                     *ALIENBASE_ROUTER,
                     *SUSHI_ROUTER,
                 ];
+                // If it's a Clanker token, it's likely on Uniswap V3.
+                // We should try Uniswap V3 first or include it.
+                // Clanker uses Uniswap V3.
+                routers_to_try.insert(0, *UNIV3_ROUTER);
             }
 
             for router in routers_to_try {
@@ -716,12 +803,14 @@ async fn process_transaction(
                             U256::zero(),
                             format!("Sim Error on {}: {}", get_router_name(&effective_router), e),
                             0,
+                            0,
                         );
                     }
                 }
             }
 
-            let (sim_ok, profit_wei, expected_tokens, reason, gas_used) = sim_result_tuple;
+            let (sim_ok, profit_wei, expected_tokens, reason, gas_used, best_fee) =
+                sim_result_tuple;
 
             if config.shadow_mode {
                 println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
@@ -765,6 +854,7 @@ async fn process_transaction(
                         config.clone(),
                         processing_locks.clone(),
                         Some(expected_tokens), // [新增] 传入模拟的代币数量
+                        best_fee,
                     ));
                 } else {
                     // 修复：如果模拟失败，立即释放锁，以便下次机会
@@ -797,6 +887,7 @@ async fn process_transaction(
                 buy_amt,
                 min_out,
                 &config,
+                best_fee,
             )
             .await
             {
@@ -811,6 +902,7 @@ async fn process_transaction(
                         router_address: effective_router,
                         initial_cost_eth: buy_amt,
                         timestamp: Local::now().timestamp() as u64,
+                        fee: Some(best_fee),
                     };
                     let _ = save_position(&pos_data);
                     task::spawn(monitor_position(
@@ -821,6 +913,7 @@ async fn process_transaction(
                         config,
                         processing_locks.clone(),
                         None, // 实盘模式不需要传入虚拟余额
+                        best_fee,
                     ));
                 }
                 Err(e) => {
@@ -901,6 +994,7 @@ async fn main() -> anyhow::Result<()> {
                 cfg,
                 processing_locks.clone(),
                 None, // 恢复持仓时，如果是 Shadow Mode 且没有持久化虚拟余额，这里可能会直接退出，这是预期行为
+                pos.fee.unwrap_or(0),
             ));
         }
     }

@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
+use anyhow::Result;
 use ethers::types::{Address, U256};
+use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::BufReader;
-use anyhow::Result;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PositionData {
@@ -10,6 +10,7 @@ pub struct PositionData {
     pub router_address: Address,
     pub initial_cost_eth: U256,
     pub timestamp: u64,
+    pub fee: Option<u32>, // Added for V3 support
 }
 
 pub fn init_storage() {

@@ -1,4 +1,6 @@
-use crate::constants::{AERODROME_FACTORY, AERODROME_ROUTER, WETH_BASE};
+use crate::constants::{
+    AERODROME_FACTORY, AERODROME_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, WETH_BASE,
+};
 use anyhow::Result;
 use ethers::abi::parse_abi;
 // [修改] 引入 Ipc，去掉 Ws
@@ -71,7 +73,7 @@ impl Simulator {
         router_addr: Address,
         amount_in_eth: U256,
         token_out: Address,
-    ) -> Result<(bool, U256, U256, String, u64)> {
+    ) -> Result<(bool, U256, U256, String, u64, u32)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
 
         // [修改] EthersDB 也要适配 Ipc
@@ -90,6 +92,10 @@ impl Simulator {
         // Aerodrome ABI (Solidly Fork)
         // getAmountsOut(uint amountIn, (address from, address to, bool stable, address factory)[] routes)
         let aero_abi = parse_abi(&["function getAmountsOut(uint,tuple(address,address,bool,address)[]) external view returns (uint[])"])?;
+
+        // Uniswap V3 QuoterV2 ABI
+        // quoteExactInputSingle(QuoteParams params)
+        let v3_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"])?;
 
         let erc20_abi = parse_abi(&[
             "function balanceOf(address) external view returns (uint)",
@@ -124,8 +130,56 @@ impl Simulator {
 
         let path = vec![*WETH_BASE, token_out];
 
+        // [新增] V3 费率探测逻辑
+        let mut best_fee = 0u32;
+        let is_v3 = router_addr == *UNIV3_ROUTER;
+
         // [修改] 针对 Aerodrome 做特殊编码
-        let amounts_out_calldata = if router_addr == *AERODROME_ROUTER {
+        let amounts_out_calldata = if is_v3 {
+            // V3 需要探测费率 (10000, 3000, 500, 100)
+            let fees = vec![10000, 3000, 500, 100];
+            let quoter = BaseContract::from(v3_quoter_abi.clone());
+            let mut found_calldata = None;
+
+            // 我们在这里做一个简单的循环模拟来找到有流动性的费率
+            // 注意：这里其实是在 revm 外部做逻辑判断，但为了准确性，我们应该在 revm 内部试错
+            // 但为了简化，我们假设 1% (10000) 或 0.3% (3000) 是最可能的 (Clanker 主要是 1% 或 0.3%)
+            // 我们构造一个 multicall 或者多次模拟?
+            // 为了性能，我们默认先试 10000 (1%)，如果失败试 3000 (0.3%)
+
+            // 这里我们只构造第一次尝试的 calldata (1%)，如果在模拟执行时失败，我们在下面处理
+            // 更好的方式是：在 simulate_bundle 外部决定费率，或者在这里暴力尝试
+            // 鉴于 revm 启动开销，我们在这里尝试找到最佳费率
+
+            for fee in fees {
+                // QuoteParams: tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96
+                let params = (*WETH_BASE, token_out, amount_in_eth, fee, U256::zero());
+                let calldata = quoter.encode("quoteExactInputSingle", (params,))?;
+
+                // 临时执行一次 view call
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+                evm.env.tx.data = calldata.0.clone().into();
+                evm.env.tx.caller = my_wallet;
+
+                if let Ok(ExecutionResult::Success {
+                    output: Output::Call(b),
+                    ..
+                }) = evm.transact_commit()
+                {
+                    // 如果成功解码出 amountOut > 0，说明这个费率有流动性
+                    if let Ok((amount_out, _, _, _)) = quoter
+                        .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
+                    {
+                        if !amount_out.is_zero() {
+                            best_fee = fee;
+                            found_calldata = Some(calldata);
+                            break;
+                        }
+                    }
+                }
+            }
+            found_calldata.unwrap_or_default() // 如果没找到，返回空的，下面会处理失败
+        } else if router_addr == *AERODROME_ROUTER {
             let aero_router = BaseContract::from(aero_abi);
             // 构造 Aerodrome 的 Route 结构体: (from, to, stable, factory)
             // stable = false (通常土狗都是非稳定币池)
@@ -143,7 +197,11 @@ impl Simulator {
         };
 
         evm.env.tx.caller = my_wallet;
-        evm.env.tx.transact_to = TransactTo::Call(revm_router);
+        if is_v3 {
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+        } else {
+            evm.env.tx.transact_to = TransactTo::Call(revm_router);
+        }
         evm.env.tx.data = amounts_out_calldata.0.into();
         evm.env.tx.value = rU256::ZERO;
         evm.env.tx.gas_limit = 500_000;
@@ -165,18 +223,25 @@ impl Simulator {
                 output: Output::Call(b),
                 ..
             } => {
-                // 尝试解码，如果失败（比如返回空字节），则视为 0
-                let decoder = if router_addr == *AERODROME_ROUTER {
-                    BaseContract::from(parse_abi(&["function getAmountsOut(uint,tuple(address,address,bool,address)[]) external view returns (uint[])"])?)
+                if is_v3 {
+                    let quoter = BaseContract::from(v3_quoter_abi);
+                    quoter
+                        .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
+                        .map(|r| r.0)
+                        .unwrap_or_default()
                 } else {
-                    router.clone()
-                };
-                decoder
-                    .decode_output::<Vec<U256>, _>("getAmountsOut", b)
-                    .unwrap_or_default()
-                    .last()
-                    .cloned()
-                    .unwrap_or_default()
+                    let decoder = if router_addr == *AERODROME_ROUTER {
+                        BaseContract::from(parse_abi(&["function getAmountsOut(uint,tuple(address,address,bool,address)[]) external view returns (uint[])"])?)
+                    } else {
+                        router.clone()
+                    };
+                    decoder
+                        .decode_output::<Vec<U256>, _>("getAmountsOut", b)
+                        .unwrap_or_default()
+                        .last()
+                        .cloned()
+                        .unwrap_or_default()
+                }
             }
             _ => U256::zero(), // 如果 revert 或其他错误，预期数量设为 0
         };
@@ -184,7 +249,24 @@ impl Simulator {
         let deadline = U256::from(9999999999u64);
 
         // [修改] 针对 Aerodrome 的买入编码
-        let buy_calldata = if router_addr == *AERODROME_ROUTER {
+        let buy_calldata = if is_v3 {
+            // Uniswap V3 Swap: exactInputSingle(ExactInputSingleParams calldata params)
+            // struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
+            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+            let v3_router = BaseContract::from(v3_router_abi);
+            // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
+            let params = (
+                *WETH_BASE,
+                token_out,
+                best_fee,
+                Address::from(my_wallet.0 .0),
+                deadline,
+                amount_in_eth,
+                U256::zero(),
+                U256::zero(),
+            );
+            v3_router.encode("exactInputSingle", (params,))?
+        } else if router_addr == *AERODROME_ROUTER {
             // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
             let aero_swap_abi = parse_abi(&["function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,tuple(address,address,bool,address)[],address,uint) external payable"])?;
             let aero_router = BaseContract::from(aero_swap_abi);
@@ -225,6 +307,7 @@ impl Simulator {
                 U256::zero(),
                 "Buy Reverted".to_string(),
                 0,
+                0,
             ));
         }
 
@@ -245,6 +328,7 @@ impl Simulator {
                     U256::zero(),
                     "Balance Check Failed".to_string(),
                     0,
+                    0,
                 ))
             }
         };
@@ -255,6 +339,7 @@ impl Simulator {
                 U256::zero(),
                 U256::zero(),
                 "Zero Tokens (High Tax or No Liquidity)".to_string(),
+                0,
                 0,
             ));
         }
@@ -270,6 +355,7 @@ impl Simulator {
                     expected_tokens, token_balance
                 ),
                 0,
+                0,
             ));
         }
 
@@ -281,7 +367,22 @@ impl Simulator {
         let sell_path = vec![token_out, *WETH_BASE];
 
         // [修改] 针对 Aerodrome 的卖出编码
-        let sell_calldata = if router_addr == *AERODROME_ROUTER {
+        let sell_calldata = if is_v3 {
+            let v3_router_abi = parse_abi(&["function exactInputSingle(tuple(address,address,uint24,address,uint256,uint256,uint256,uint160)) external payable returns (uint256)"])?;
+            let v3_router = BaseContract::from(v3_router_abi);
+            // Sell: Token -> WETH
+            let params = (
+                token_out,
+                *WETH_BASE,
+                best_fee,
+                Address::from(my_wallet.0 .0),
+                deadline,
+                token_balance,
+                U256::zero(),
+                U256::zero(),
+            );
+            v3_router.encode("exactInputSingle", (params,))?
+        } else if router_addr == *AERODROME_ROUTER {
             let aero_sell_abi = parse_abi(&["function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,tuple(address,address,bool,address)[],address,uint) external"])?;
             let aero_router = BaseContract::from(aero_sell_abi);
             let route = (token_out, *WETH_BASE, false, *AERODROME_FACTORY);
@@ -321,6 +422,7 @@ impl Simulator {
                 expected_tokens,
                 "HONEYPOT: Sell Reverted".to_string(),
                 0,
+                0,
             ));
         }
         let gas_used = match sell_result.unwrap() {
@@ -341,6 +443,7 @@ impl Simulator {
                 expected_tokens,
                 "Profitable".to_string(),
                 gas_used,
+                best_fee,
             ))
         } else {
             Ok((
@@ -349,6 +452,7 @@ impl Simulator {
                 expected_tokens,
                 "Sellable but Loss".to_string(),
                 gas_used,
+                best_fee,
             ))
         }
     }

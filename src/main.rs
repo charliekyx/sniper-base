@@ -1109,9 +1109,9 @@ async fn monitor_position(
             // V3 Price Check
             let params = (token_addr, *WETH_BASE, balance, fee, U256::zero());
             match quoter_contract
-                .method::<(Address, Address, U256, u32, U256), (U256, U256, u32, U256)>(
+                .method::<((Address, Address, U256, u32, U256),), (U256, U256, u32, U256)>(
                     "quoteExactInputSingle",
-                    params,
+                    (params,), // [修复] 包裹在 Tuple 中，作为单个结构体参数传递
                 ) {
                 Ok(m) => match m.call().await {
                     Ok((amount_out, _, _, _)) => amount_out,

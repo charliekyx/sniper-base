@@ -501,6 +501,7 @@ impl Simulator {
             let fees = vec![10000, 3000, 2500, 500, 100];
             let quoter = BaseContract::from(v3_quoter_abi.clone());
             let mut found_calldata = None;
+            let mut max_amount_out = U256::zero();
 
             // 我们在这里做一个简单的循环模拟来找到有流动性的费率
             // 注意：这里其实是在 revm 外部做逻辑判断，但为了准确性，我们应该在 revm 内部试错
@@ -536,15 +537,23 @@ impl Simulator {
                     if let Ok((amount_out, _, _, _)) = quoter
                         .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
                     {
-                        if !amount_out.is_zero() {
-                            println!("      [Sim] V3 Pool Found: Fee={}", fee);
+                        if amount_out > max_amount_out {
+                            // Found a better pool
+                            max_amount_out = amount_out;
                             best_fee = fee;
                             found_calldata = Some(calldata);
-                            break;
                         }
                     }
                 }
             }
+
+            if !max_amount_out.is_zero() {
+                println!(
+                    "      [Sim] V3 Best Pool Found: Fee={} Out={}",
+                    best_fee, max_amount_out
+                );
+            }
+
             // [修改] 如果 V3 没找到任何费率的池子，直接返回明确错误，不要传空数据去执行
             found_calldata
                 .ok_or_else(|| anyhow::anyhow!("V3_No_Liquidity"))

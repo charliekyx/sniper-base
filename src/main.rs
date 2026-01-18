@@ -1859,18 +1859,12 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
         let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
         println!("   [TEST] Simulating Virtuals Buy (Random Token) to verify ABI...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        // Random token address
-        let random_token = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
+        // Use a valid token address (e.g. USDC) to avoid balanceOf crash during simulation
+        // Even if the pair doesn't exist on Virtuals, we just want to verify the 'buy' call doesn't panic the encoder
+        let test_token = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap(); // USDC
 
         let sim_res = simulator
-            .simulate_bundle(
-                origin,
-                None,
-                *VIRTUALS_ROUTER,
-                amount_in,
-                random_token,
-                None,
-            )
+            .simulate_bundle(origin, None, *VIRTUALS_ROUTER, amount_in, test_token, None)
             .await;
 
         match sim_res {

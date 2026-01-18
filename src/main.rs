@@ -957,6 +957,10 @@ async fn process_transaction(
         // [新增] 提取 V4 PoolKey
         let mut v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
 
+        if let Some(pk) = v4_pool_key {
+            println!("   [DEBUG] Extracted V4 PoolKey: Token0={:?}, Token1={:?}, Fee={}, TickSpacing={}, Hooks={:?}", pk.0, pk.1, pk.2, pk.3, pk.4);
+        }
+
         let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {
             (act, tok)
         } else if is_from_target {
@@ -988,6 +992,9 @@ async fn process_transaction(
                 // 如果之前没提取到 PoolKey，这里再试一次（虽然 input 没变，但逻辑上确认是 Universal）
                 if v4_pool_key.is_none() {
                     v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
+                    if v4_pool_key.is_some() {
+                        println!("   [DEBUG] Late Extraction of V4 PoolKey Success");
+                    }
                 }
             } else {
                 return; // 模拟也没发现代币流入（可能是卖出或失败），跳过
@@ -1083,60 +1090,48 @@ async fn process_transaction(
                 0u32,
             );
 
-            let r_name = get_router_name(&to);
-
-            // [策略重构] 盲测模式：构建一个策略列表，依次尝试
-            // 结构: (Router地址, V4_PoolKey选项, 描述)
+            // [Strategy Upgrade] Expanded Search for Clanker V4
             let mut strategies: Vec<(Address, Option<PoolKey>, String)> = Vec::new();
-
-            // 1. 优先尝试提取到的 V4 Key (如果有)
             if let Some(pk) = v4_pool_key {
                 strategies.push((*UNIVERSAL_ROUTER, Some(pk), "Extracted V4 Key".to_string()));
             }
 
-            // 2. 总是尝试“盲猜” Clanker V4 配置 (即使目标用的是 Odos/1inch，最终流动性可能还在 V4)
-            // Clanker V4 特征: Fee 1%, Tick 60, Hook = Factory
-            // [修改] 去掉 router_name 的限制，强制加入 V4 盲测
-            {
-                let token0 = if token_addr < *WETH_BASE {
-                    token_addr
-                } else {
-                    *WETH_BASE
-                };
-                let token1 = if token_addr < *WETH_BASE {
-                    *WETH_BASE
-                } else {
-                    token_addr
-                };
+            let token0 = if token_addr < *WETH_BASE {
+                token_addr
+            } else {
+                *WETH_BASE
+            };
+            let token1 = if token_addr < *WETH_BASE {
+                *WETH_BASE
+            } else {
+                token_addr
+            };
 
-                let guess_key = (
-                    token0,
-                    token1,
-                    10000,               // Fee 1%
-                    60,                  // TickSpacing
-                    *CLANKER_FACTORY_V4, // Hook Guess
-                );
-                strategies.push((
-                    *UNIVERSAL_ROUTER,
-                    Some(guess_key),
-                    "Guess Clanker V4 (1%)".to_string(),
-                ));
-            }
+            // 1. 首选：Clanker 标准配置 (1% Fee, 200 Tick) - 最可能命中
+            strategies.push((
+                *UNIVERSAL_ROUTER,
+                Some((token0, token1, 10000, 200, *CLANKER_FACTORY_V4)),
+                "Guess Clanker V4 (1% / Tick 200)".to_string(),
+            ));
+            // 2. 备选：Clanker 激进配置 (1% Fee, 60 Tick) - 防止它使用更密的 Tick
+            strategies.push((
+                *UNIVERSAL_ROUTER,
+                Some((token0, token1, 10000, 60, *CLANKER_FACTORY_V4)),
+                "Guess Clanker V4 (1% / Tick 60)".to_string(),
+            ));
 
-            // 3. 总是尝试 Uniswap V3 (Clanker 经常兼容 V3，或者有 V3 池子)
             strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
-
-            // 4. 尝试主流 V2 DEX (Aerodrome, BaseSwap, etc.)
             strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
             strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
             strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));
             strategies.push((*SUSHI_ROUTER, None, "SushiSwap V2".to_string()));
 
             println!("   [Strategy] Scanning markets for liquidity...");
+            let mut debug_errors = Vec::new();
 
             for (router, key, desc) in strategies {
                 effective_router = router;
-                let r_name_debug = get_router_name(&router);
+                println!("   [Strategy] Attempting: {} (Router: {:?})", desc, router);
                 let sim_res = simulator
                     .simulate_bundle(
                         client.address(),
@@ -1151,109 +1146,73 @@ async fn process_transaction(
                 match sim_res {
                     Ok(res) => {
                         sim_result_tuple = res;
-                        // 如果模拟成功（sim_ok = true），说明在这个路由上买入成功且有余额
+                        println!(
+                            "      -> Sim Result: Success={}, Gas={}, Reason='{}', Out={}",
+                            sim_result_tuple.0,
+                            sim_result_tuple.4,
+                            sim_result_tuple.3,
+                            sim_result_tuple.2
+                        );
                         if sim_result_tuple.0 {
-                            println!(
-                                "   [Strategy] Liquidity found via [{}] on {}! (Est: {})",
-                                desc, r_name_debug, sim_result_tuple.2
-                            );
-                            // 如果成功的是盲猜的 Key，我们需要更新 v4_pool_key 以便后续交易使用
+                            println!("   [Strategy] Liquidity found via [{}]!", desc);
                             if key.is_some() {
                                 v4_pool_key = key;
                             }
                             break;
                         } else {
-                            // [新增] 打印失败原因，方便调试
-                            println!(
-                                "   [Debug] Tried [{}] -> Failed: {}",
-                                desc, sim_result_tuple.3
-                            );
+                            debug_errors.push(format!("[{}: {}]", desc, sim_result_tuple.3));
                         }
                     }
                     Err(e) => {
-                        // 记录错误但继续尝试下一个
-                        println!("   [Debug] Tried [{}] -> Error: {:?}", desc, e);
-                        sim_result_tuple = (
-                            false,
-                            U256::zero(),
-                            U256::zero(),
-                            format!("Sim Error on {}: {}", r_name_debug, e),
-                            0,
-                            0,
-                        );
+                        println!("      -> Sim Error: {:?}", e);
+                        debug_errors.push(format!("[{}: Error {}]", desc, e));
                     }
                 }
             }
 
-            let (sim_ok, profit_wei, expected_tokens, reason, gas_used, best_fee) =
-                sim_result_tuple;
+            let (sim_ok, _profit_wei, expected_tokens, reason, gas_used, best_fee) =
+                sim_result_tuple.clone();
 
-            if config.shadow_mode {
-                println!("   [Shadow] Sim Result: {} | Reason: {}", sim_ok, reason);
-                log_to_file(format!(
-                    "[Shadow] Sim Result: {} | Reason: {} | Token: {:?}",
-                    sim_ok, reason, token_addr
-                ));
-
-                // Use 'profit_wei' directly (it is a U256 value, not a reference, so no '*' needed)
-                let profit_eth = if sim_ok {
-                    Some(ethers::utils::format_units(profit_wei, "ether").unwrap_or_default())
-                } else {
-                    None
-                };
-
-                log_shadow_trade(ShadowRecord {
-                    timestamp: Local::now().to_rfc3339(),
-                    event_type: action.to_string(),
-                    router: get_router_name(&effective_router), // [修复] 记录实际使用的有效路由(如 BaseSwap)，而不是目标的路由(如 Odos)
-                    trigger_hash: format!("{:?}", tx.hash),
-                    token_address: format!("{:?}", token_addr),
-                    amount_in_eth: config.buy_amount_eth.to_string(),
-                    simulation_result: reason.clone(),
-                    profit_eth_after_sell: profit_eth,
-                    gas_used,
-                    copy_target: if is_target_buy {
-                        Some(format!("{:?}", tx.from))
-                    } else {
-                        None
-                    },
-                });
-
-                // 改进：如果你想在 Shadow Mode 测试卖出逻辑，可以模拟启动监控
-                if sim_ok {
-                    println!("   [Shadow] Starting virtual monitor for {:?}", token_addr);
-                    task::spawn(monitor_position(
-                        client.clone(),
-                        effective_router,
-                        token_addr,
-                        buy_amt,
-                        config.clone(),
-                        processing_locks.clone(),
-                        Some(expected_tokens), // [新增] 传入模拟的代币数量
-                        best_fee,
-                        v4_pool_key,
-                    ));
-                } else {
-                    // 修复：如果模拟失败，立即释放锁，以便下次机会
-                    cleanup(token_addr);
-                }
-
-                // 影子模式下直接返回，不进入实盘逻辑
-                return;
-            }
-
-            // Real Trading Logic (Only reached if shadow_mode is false)
             if !sim_ok {
-                println!("   [ABORT] Simulation failed: {}. Likely Honeypot.", reason);
+                println!("   [ABORT] All strategies failed.");
+                for err in &debug_errors {
+                    println!("      -> {}", err);
+                }
                 log_to_file(format!(
-                    "[ABORT] Sim failed: {} | Token: {:?}",
-                    reason, token_addr
+                    "[ABORT] All Failed: {:?} | Token: {:?}",
+                    debug_errors, token_addr
                 ));
                 cleanup(token_addr);
                 return;
             }
 
-            let min_out = expected_tokens * 80 / 100;
+            if config.shadow_mode {
+                println!("   [Shadow] Sim OK: {}", reason);
+                log_shadow_trade(ShadowRecord {
+                    timestamp: Local::now().to_rfc3339(),
+                    event_type: action.to_string(),
+                    router: get_router_name(&effective_router),
+                    trigger_hash: format!("{:?}", tx.hash),
+                    token_address: format!("{:?}", token_addr),
+                    amount_in_eth: config.buy_amount_eth.to_string(),
+                    simulation_result: reason.clone(),
+                    profit_eth_after_sell: Some("0.0".to_string()),
+                    gas_used,
+                    copy_target: Some(format!("{:?}", tx.from)),
+                });
+                task::spawn(monitor_position(
+                    client.clone(),
+                    effective_router,
+                    token_addr,
+                    buy_amt,
+                    config.clone(),
+                    processing_locks.clone(),
+                    Some(expected_tokens),
+                    best_fee,
+                    v4_pool_key,
+                ));
+                return;
+            }
 
             match execute_buy_and_approve(
                 client.clone(),
@@ -1262,7 +1221,7 @@ async fn process_transaction(
                 *WETH_BASE,
                 token_addr,
                 buy_amt,
-                min_out,
+                expected_tokens * 80 / 100, // 20% Slippage
                 &config,
                 best_fee,
                 v4_pool_key,

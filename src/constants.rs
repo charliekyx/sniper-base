@@ -41,8 +41,9 @@ lazy_static! {
     pub static ref SWAPBASED_ROUTER: Address = Address::from_str("0xaaa3b1F1bd7BCc97fD1917c18ade665C5D31F066").unwrap();
     // RocketSwap Router (Base)
     pub static ref ROCKETSWAP_ROUTER: Address = Address::from_str("0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0").unwrap();
-    // Virtuals Protocol (Base) - Agent Factory / Router
-    pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0xF8DD39c71A278FE9F4377D009D7627EF140f809e").unwrap();
+    // Virtuals Protocol (Base)
+    // We use the VIRTUAL Token address as a placeholder for the "Hop via VIRTUAL" strategy
+    pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {
@@ -59,7 +60,7 @@ lazy_static! {
         m.insert(*SWAPBASED_ROUTER, "SwapBased".to_string());
         m.insert(*ROCKETSWAP_ROUTER, "RocketSwap".to_string());
         m.insert(*PANCAKESWAP_V3_ROUTER, "PancakeSwapV3".to_string());
-        m.insert(*VIRTUALS_ROUTER, "VirtualsProtocol".to_string());
+        m.insert(*VIRTUALS_ROUTER, "Virtuals(Hop)".to_string());
         m
     };
 }

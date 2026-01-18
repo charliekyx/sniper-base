@@ -415,20 +415,19 @@ async fn execute_buy_and_approve(
         let mut v3_swap_abi = Abi::default();
         v3_swap_abi
             .functions
-            .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
-
-        // [Fix] Manual Token Construction for V3 Buy
-        let params_token = Token::Tuple(vec![
-            Token::Address(*WETH_BASE),
-            Token::Address(token_out),
-            Token::Uint(U256::from(fee)),
-            Token::Address(client.address()),
-            Token::Uint(amount_in),
-            Token::Uint(amount_out_min),
-            Token::Uint(U256::zero()), // sqrtPriceLimitX96
-        ]);
-        let encoded = v3_swap_func.encode_input(&[params_token])?;
-        Bytes::from(encoded)
+            .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+        let router = BaseContract::from(v3_swap_abi);
+        // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
+        let params = (
+            *WETH_BASE,
+            token_out,
+            fee,
+            client.address(),
+            amount_in,
+            amount_out_min,
+            U256::zero(),
+        );
+        router.encode("exactInputSingle", (params,))?
     } else if router_addr == *AERODROME_ROUTER {
         let route_struct_type = ParamType::Tuple(vec![
             ParamType::Address, // from
@@ -483,43 +482,60 @@ async fn execute_buy_and_approve(
             (amount_out_min, routes, client.address(), deadline),
         )?
     } else if router_addr == *VIRTUALS_ROUTER {
-        // Virtuals Protocol Buy
-        // buy(address token, uint256 amountIn, uint256 minAmountOut)
+        // Virtuals Protocol Buy (Multihop via Aerodrome)
+        // ETH -> VIRTUAL -> Token
+        let route_struct_type = ParamType::Tuple(vec![
+            ParamType::Address, // from
+            ParamType::Address, // to
+            ParamType::Bool,    // stable
+            ParamType::Address, // factory
+        ]);
         #[allow(deprecated)]
-        let virtuals_buy_func = Function {
-            name: "buy".to_string(),
+        let aero_swap_func = Function {
+            name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
             inputs: vec![
                 Param {
-                    name: "token".to_string(),
+                    name: "amountOutMin".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "routes".to_string(),
+                    kind: ParamType::Array(Box::new(route_struct_type)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "to".to_string(),
                     kind: ParamType::Address,
                     internal_type: None,
                 },
                 Param {
-                    name: "amountIn".to_string(),
-                    kind: ParamType::Uint(256),
-                    internal_type: None,
-                },
-                Param {
-                    name: "minAmountOut".to_string(),
+                    name: "deadline".to_string(),
                     kind: ParamType::Uint(256),
                     internal_type: None,
                 },
             ],
-            outputs: vec![Param {
-                name: "amountOut".to_string(),
-                kind: ParamType::Uint(256),
-                internal_type: None,
-            }],
+            outputs: vec![],
             constant: None,
             state_mutability: StateMutability::Payable,
         };
-        let mut virtuals_abi = Abi::default();
-        virtuals_abi
-            .functions
-            .insert("buy".to_string(), vec![virtuals_buy_func]);
-        let router = BaseContract::from(virtuals_abi);
+        let mut aero_swap_abi = Abi::default();
+        aero_swap_abi.functions.insert(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            vec![aero_swap_func],
+        );
+        let router = BaseContract::from(aero_swap_abi);
+        let route1 = (*WETH_BASE, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
+        let route2 = (*VIRTUALS_ROUTER, token_out, false, *AERODROME_FACTORY);
+        let routes = vec![route1, route2];
 
-        router.encode("buy", (token_out, amount_in, amount_out_min))?
+        // Note: We send transaction to AERODROME_ROUTER, not VIRTUALS_ROUTER
+        // But this function takes `router_addr` which is VIRTUALS_ROUTER.
+        // We need to override the destination address in the transaction construction below.
+        router.encode(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens",
+            (amount_out_min, routes, client.address(), deadline),
+        )?
     } else {
         // 标准 V2
         let mut router_abi = Abi::default();
@@ -568,8 +584,14 @@ async fn execute_buy_and_approve(
     let priority_fee = U256::from(config.max_priority_fee_gwei * 1_000_000_000);
     let total_gas_price = gas_price + priority_fee;
 
+    let target_router = if router_addr == *VIRTUALS_ROUTER {
+        *AERODROME_ROUTER
+    } else {
+        router_addr
+    };
+
     let buy_tx = Eip1559TransactionRequest::new()
-        .to(router_addr)
+        .to(target_router)
         .value(amount_in)
         .data(calldata.0)
         .gas(config.gas_limit) // Base 链建议给足 Gas
@@ -777,20 +799,19 @@ async fn execute_smart_sell(
                 let mut v3_swap_abi = Abi::default();
                 v3_swap_abi
                     .functions
-                    .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
-
-                // [Fix] Manual Token Construction for V3 Sell
-                let params_token = Token::Tuple(vec![
-                    Token::Address(token_in),
-                    Token::Address(token_out),
-                    Token::Uint(U256::from(fee)),
-                    Token::Address(client.address()),
-                    Token::Uint(amt),
-                    Token::Uint(U256::zero()), // amountOutMinimum
-                    Token::Uint(U256::zero()), // sqrtPriceLimitX96
-                ]);
-                let encoded = v3_swap_func.encode_input(&[params_token])?;
-                Bytes::from(encoded)
+                    .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
+                let router = BaseContract::from(v3_swap_abi);
+                // Sell: Token -> WETH
+                let params = (
+                    token_in,
+                    token_out,
+                    fee,
+                    client.address(),
+                    amt,
+                    U256::zero(),
+                    U256::zero(),
+                );
+                router.encode("exactInputSingle", (params,))?
             } else if router_addr == *AERODROME_ROUTER {
                 let route_struct_type = ParamType::Tuple(vec![
                     ParamType::Address, // from
@@ -850,17 +871,18 @@ async fn execute_smart_sell(
                     (amt, U256::zero(), routes, client.address(), deadline),
                 )?
             } else if router_addr == *VIRTUALS_ROUTER {
-                // Virtuals Protocol Sell
-                // sell(address token, uint256 amountIn, uint256 minAmountOut)
+                // Virtuals Protocol Sell (Multihop via Aerodrome)
+                // Token -> VIRTUAL -> ETH
+                let route_struct_type = ParamType::Tuple(vec![
+                    ParamType::Address, // from
+                    ParamType::Address, // to
+                    ParamType::Bool,    // stable
+                    ParamType::Address, // factory
+                ]);
                 #[allow(deprecated)]
-                let virtuals_sell_func = Function {
-                    name: "sell".to_string(),
+                let aero_sell_func = Function {
+                    name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
                     inputs: vec![
-                        Param {
-                            name: "token".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
                         Param {
                             name: "amountIn".to_string(),
                             kind: ParamType::Uint(256),
@@ -871,22 +893,41 @@ async fn execute_smart_sell(
                             kind: ParamType::Uint(256),
                             internal_type: None,
                         },
+                        Param {
+                            name: "routes".to_string(),
+                            kind: ParamType::Array(Box::new(route_struct_type)),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "to".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "deadline".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
                     ],
-                    outputs: vec![Param {
-                        name: "amountOut".to_string(),
-                        kind: ParamType::Uint(256),
-                        internal_type: None,
-                    }],
+                    outputs: vec![],
                     constant: None,
                     state_mutability: StateMutability::NonPayable,
                 };
-                let mut virtuals_abi = Abi::default();
-                virtuals_abi
-                    .functions
-                    .insert("sell".to_string(), vec![virtuals_sell_func]);
-                let router = BaseContract::from(virtuals_abi);
+                let mut aero_sell_abi = Abi::default();
+                aero_sell_abi.functions.insert(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                    vec![aero_sell_func],
+                );
+                let router = BaseContract::from(aero_sell_abi);
 
-                router.encode("sell", (token_in, amt, U256::zero()))?
+                let route1 = (token_in, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
+                let route2 = (*VIRTUALS_ROUTER, *WETH_BASE, false, *AERODROME_FACTORY);
+                let routes = vec![route1, route2];
+
+                router.encode(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
+                    (amt, U256::zero(), routes, client.address(), deadline),
+                )?
             } else {
                 // 标准 V2
                 let mut router_abi = Abi::default();
@@ -940,9 +981,15 @@ async fn execute_smart_sell(
             let prio_fee_val = U256::from(priority_fee * 1_000_000_000 * gas_mult);
             let max_fee = base_fee + prio_fee_val;
 
+            let target_router = if router_addr == *VIRTUALS_ROUTER {
+                *AERODROME_ROUTER
+            } else {
+                router_addr
+            };
+
             // [升级] 使用 EIP-1559 交易
             let tx = Eip1559TransactionRequest::new()
-                .to(router_addr)
+                .to(target_router)
                 .data(calldata.0)
                 // 修复：卖出给足 Gas，防止因为逻辑复杂 OutOfGas 导致卖不出去
                 .gas(500_000)
@@ -1217,40 +1264,49 @@ async fn monitor_position(
                 }
             }
         } else if router_addr == *VIRTUALS_ROUTER {
-            // Virtuals Price Check
-            // getSellPrice(address token, uint256 amount) returns (uint256 ethAmount)
+            // Virtuals Price Check (Multihop via Aerodrome)
+            // getAmountsOut(amount, [Token, VIRTUAL, WETH])
             #[allow(deprecated)]
-            let get_sell_price_func = Function {
-                name: "getSellPrice".to_string(),
+            let get_amounts_out_func = Function {
+                name: "getAmountsOut".to_string(),
                 inputs: vec![
                     Param {
-                        name: "token".to_string(),
-                        kind: ParamType::Address,
+                        name: "amountIn".to_string(),
+                        kind: ParamType::Uint(256),
                         internal_type: None,
                     },
                     Param {
-                        name: "amount".to_string(),
-                        kind: ParamType::Uint(256),
+                        name: "routes".to_string(),
+                        kind: ParamType::Array(Box::new(ParamType::Tuple(vec![
+                            ParamType::Address,
+                            ParamType::Address,
+                            ParamType::Bool,
+                            ParamType::Address,
+                        ]))),
                         internal_type: None,
                     },
                 ],
                 outputs: vec![Param {
-                    name: "price".to_string(),
-                    kind: ParamType::Uint(256),
+                    name: "amounts".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Uint(256))),
                     internal_type: None,
                 }],
                 constant: Some(true),
                 state_mutability: StateMutability::View,
             };
-            let mut v_abi = Abi::default();
-            v_abi
+            let mut aero_abi = Abi::default();
+            aero_abi
                 .functions
-                .insert("getSellPrice".to_string(), vec![get_sell_price_func]);
-            let v_contract = Contract::new(router_addr, v_abi, client.clone());
+                .insert("getAmountsOut".to_string(), vec![get_amounts_out_func]);
+            let v_contract = Contract::new(*AERODROME_ROUTER, aero_abi, client.clone());
 
-            match v_contract.method::<_, U256>("getSellPrice", (token_addr, balance)) {
+            let route1 = (token_addr, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
+            let route2 = (*VIRTUALS_ROUTER, *WETH_BASE, false, *AERODROME_FACTORY);
+            let routes = vec![route1, route2];
+
+            match v_contract.method::<_, Vec<U256>>("getAmountsOut", (balance, routes)) {
                 Ok(m) => match m.call().await {
-                    Ok(val) => val,
+                    Ok(v) => *v.last().unwrap_or(&U256::zero()),
                     Err(_) => {
                         sleep(Duration::from_millis(500)).await;
                         continue;
@@ -1859,12 +1915,18 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
         let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
         println!("   [TEST] Simulating Virtuals Buy (Random Token) to verify ABI...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
-        // Use a valid token address (e.g. USDC) to avoid balanceOf crash during simulation
-        // Even if the pair doesn't exist on Virtuals, we just want to verify the 'buy' call doesn't panic the encoder
-        let test_token = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap(); // USDC
+        // Random token address
+        let random_token = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
 
         let sim_res = simulator
-            .simulate_bundle(origin, None, *VIRTUALS_ROUTER, amount_in, test_token, None)
+            .simulate_bundle(
+                origin,
+                None,
+                *VIRTUALS_ROUTER,
+                amount_in,
+                random_token,
+                None,
+            )
             .await;
 
         match sim_res {

@@ -963,7 +963,10 @@ async fn process_transaction(
         let mut v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
 
         if let Some(pk) = v4_pool_key {
-            println!("   [DEBUG] Extracted V4 PoolKey: Token0={:?}, Token1={:?}, Fee={}, TickSpacing={}, Hooks={:?}", pk.0, pk.1, pk.2, pk.3, pk.4);
+            // [优化] 仅当交易来自监控目标时才打印 V4 详情，避免刷屏
+            if is_from_target {
+                println!("   [DEBUG] Extracted V4 PoolKey: Token0={:?}, Token1={:?}, Fee={}, TickSpacing={}, Hooks={:?}", pk.0, pk.1, pk.2, pk.3, pk.4);
+            }
         }
 
         let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {

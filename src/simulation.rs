@@ -1153,10 +1153,51 @@ impl Simulator {
                 0,
             ));
         }
+
+        // Check for Revert in Sell
+        if let Ok(ExecutionResult::Revert { output, .. }) = &sell_result {
+            let reason = decode_revert_reason(output);
+            return Ok((
+                false,
+                U256::zero(),
+                expected_tokens,
+                format!("Sell Reverted: {}", reason),
+                0,
+                0,
+            ));
+        }
+
         let gas_used = match sell_result.unwrap() {
             ExecutionResult::Success { gas_used, .. } => gas_used,
             _ => 0,
         };
+
+        // [Fix] Unwrap WETH if we are using V3 (exactInputSingle does not unwrap)
+        if is_v3 {
+            // Check WETH balance
+            let weth_balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(WETH_BASE.0));
+            evm.env.tx.data = weth_balance_calldata.0.into();
+
+            if let Ok(ExecutionResult::Success {
+                output: Output::Call(b),
+                ..
+            }) = evm.transact_commit()
+            {
+                let weth_bal: U256 = token.decode_output("balanceOf", b).unwrap_or_default();
+                if !weth_bal.is_zero() {
+                    // withdraw(uint256)
+                    let withdraw_sig = ethers::utils::id("withdraw(uint256)")[0..4].to_vec();
+                    let withdraw_data = Bytes::from(
+                        [withdraw_sig, ethers::abi::encode(&[Token::Uint(weth_bal)])].concat(),
+                    );
+
+                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(WETH_BASE.0));
+                    evm.env.tx.data = withdraw_data.0.into();
+                    evm.transact_commit().ok();
+                }
+            }
+        }
 
         let final_eth = cache_db
             .basic(my_wallet)

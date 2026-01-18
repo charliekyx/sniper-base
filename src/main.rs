@@ -126,8 +126,13 @@ fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
                         ethers::abi::ParamType::Bytes,
                     ];
 
-                    let decoded_params = ethers::abi::decode(&params_type, p).ok()?;
-                    let pk_tuple = decoded_params[0].clone().into_tuple()?;
+                    // [修复] V4 参数解码修正
+                    // p 是 abi.encode(params_struct)，由于结构体包含 bytes (dynamic)，头部有偏移量。
+                    // 我们将其包装为 Tuple，让解码器正确跳过偏移量。
+                    let whole_struct = ethers::abi::ParamType::Tuple(params_type);
+                    let decoded = ethers::abi::decode(&[whole_struct], p).ok()?;
+                    let struct_tuple = decoded[0].clone().into_tuple()?;
+                    let pk_tuple = struct_tuple[0].clone().into_tuple()?;
 
                     let c0 = pk_tuple[0].clone().into_address()?;
                     let c1 = pk_tuple[1].clone().into_address()?;

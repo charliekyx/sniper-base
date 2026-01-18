@@ -3,7 +3,7 @@ use crate::constants::{
     UNIVERSAL_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
-use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability, Token};
+use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
 // [修改] 引入 Ipc，去掉 Ws
 use ethers::prelude::{BaseContract, Ipc, Middleware, Provider};
 use ethers::types::{Address, Bytes, Transaction, U256};
@@ -198,21 +198,200 @@ impl Simulator {
             .functions
             .insert("quoteExactInputSingle".to_string(), vec![v3_function]);
 
-        // 3. Uniswap V4 Quoter ABI (保持 parse_abi 或照样改写，V4 暂时不是报错重点，可以用 parse_abi 兼容)
-        // 如果 V4 也报错，请告诉我，我们用同样的方法改写。目前先保留原来的字符串解析，只要加上 tuple
-        let v4_quoter_abi = parse_abi(&["function quoteExactInputSingle(tuple(tuple(address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"])?;
+        // 3. [修复] Uniswap V4 Quoter ABI - 手动构建，彻底解决 Invalid data
+        // PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
+        let v4_pool_key_type = ParamType::Tuple(vec![
+            ParamType::Address,
+            ParamType::Address,
+            ParamType::Uint(24),
+            ParamType::Int(24),
+            ParamType::Address,
+        ]);
+        // QuoteParams: (poolKey, zeroForOne, amountIn, hookData)
+        let v4_params_type = ParamType::Tuple(vec![
+            v4_pool_key_type,
+            ParamType::Bool,
+            ParamType::Uint(128),
+            ParamType::Bytes,
+        ]);
+        #[allow(deprecated)]
+        let v4_function = Function {
+            name: "quoteExactInputSingle".to_string(),
+            inputs: vec![Param {
+                name: "params".to_string(),
+                kind: v4_params_type,
+                internal_type: None,
+            }],
+            outputs: vec![
+                Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "gasEstimate".to_string(),
+                    kind: ParamType::Uint(128),
+                    internal_type: None,
+                },
+            ],
+            constant: None,
+            state_mutability: StateMutability::NonPayable,
+        };
+        let mut v4_quoter_abi = Abi::default();
+        v4_quoter_abi
+            .functions
+            .insert("quoteExactInputSingle".to_string(), vec![v4_function]);
 
-        // 4. 标准 V2 和 ERC20 比较简单，不容易出错，保持原样即可
-        let router_abi = parse_abi(&[
-            "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint,address[],address,uint) external payable",
-            "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint,uint,address[],address,uint) external",
-            "function getAmountsOut(uint,address[]) external view returns (uint[])"
-        ])?;
+        // 4. 标准 V2 Router ABI - 手动构建
+        let mut router_abi = Abi::default();
+        // swapExactETH...
+        #[allow(deprecated)]
+        let swap_eth_func = Function {
+            name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountOutMin".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "path".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Address)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "to".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "deadline".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        router_abi.functions.insert(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            vec![swap_eth_func],
+        );
+        // swapExactTokens...
+        #[allow(deprecated)]
+        let swap_tokens_func = Function {
+            name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountIn".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "amountOutMin".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "path".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Address)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "to".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "deadline".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![],
+            constant: None,
+            state_mutability: StateMutability::NonPayable,
+        };
+        router_abi.functions.insert(
+            "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+            vec![swap_tokens_func],
+        );
+        // getAmountsOut
+        #[allow(deprecated)]
+        let get_amounts_out_func = Function {
+            name: "getAmountsOut".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountIn".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "path".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Address)),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![Param {
+                name: "amounts".to_string(),
+                kind: ParamType::Array(Box::new(ParamType::Uint(256))),
+                internal_type: None,
+            }],
+            constant: Some(true),
+            state_mutability: StateMutability::View,
+        };
+        router_abi
+            .functions
+            .insert("getAmountsOut".to_string(), vec![get_amounts_out_func]);
 
-        let erc20_abi = parse_abi(&[
-            "function balanceOf(address) external view returns (uint)",
-            "function approve(address,uint) external returns (bool)",
-        ])?;
+        // 5. ERC20 ABI - 手动构建
+        let mut erc20_abi = Abi::default();
+        #[allow(deprecated)]
+        let balance_of_func = Function {
+            name: "balanceOf".to_string(),
+            inputs: vec![Param {
+                name: "account".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            }],
+            outputs: vec![Param {
+                name: "balance".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            }],
+            constant: Some(true),
+            state_mutability: StateMutability::View,
+        };
+        erc20_abi
+            .functions
+            .insert("balanceOf".to_string(), vec![balance_of_func]);
+        #[allow(deprecated)]
+        let approve_func = Function {
+            name: "approve".to_string(),
+            inputs: vec![
+                Param {
+                    name: "spender".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "amount".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![Param {
+                name: "success".to_string(),
+                kind: ParamType::Bool,
+                internal_type: None,
+            }],
+            constant: None,
+            state_mutability: StateMutability::NonPayable,
+        };
+        erc20_abi
+            .functions
+            .insert("approve".to_string(), vec![approve_func]);
 
         let router = BaseContract::from(router_abi);
         let token = BaseContract::from(erc20_abi);
@@ -257,7 +436,7 @@ impl Simulator {
                 Token::Address(pool_key.0),
                 Token::Address(pool_key.1),
                 Token::Uint(U256::from(pool_key.2)),
-                Token::Int(U256::from(pool_key.3)), // i32 -> U256 (for positive ticks like 60/200 this is fine)
+                Token::Int(U256::from(pool_key.3 as u32)), // [修复] i32 -> u32 -> U256，确保位模式正确
                 Token::Address(pool_key.4),
             ]);
             // Params: (poolKey, zeroForOne, amountIn, hookData)

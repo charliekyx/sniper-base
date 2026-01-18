@@ -574,6 +574,7 @@ impl Simulator {
             }
         };
 
+        // [Debug] 打印 Quote 结果
         let expected_tokens: U256 = match result_amounts {
             ExecutionResult::Success {
                 output: Output::Call(b),
@@ -609,6 +610,7 @@ impl Simulator {
                 output: Output::Create(..),
                 ..
             } => {
+                println!("      [Sim] Quote returned Contract Creation (Unexpected)");
                 return Ok((
                     false,
                     U256::zero(),
@@ -621,9 +623,11 @@ impl Simulator {
             // [新增] 捕获 Revert 原因
             ExecutionResult::Revert { output, .. } => {
                 let reason = decode_revert_reason(&output);
+                println!("      [Sim] Quote Reverted: {}", reason);
                 return Ok((false, U256::zero(), U256::zero(), reason, 0, 0));
             }
             ExecutionResult::Halt { reason, .. } => {
+                println!("      [Sim] Quote Halted: {:?}", reason);
                 return Ok((
                     false,
                     U256::zero(),
@@ -634,6 +638,11 @@ impl Simulator {
                 ));
             }
         };
+
+        println!(
+            "      [Sim] Quote Success. Expected Out: {}",
+            expected_tokens
+        );
 
         let deadline = U256::from(9999999999u64);
 
@@ -777,15 +786,35 @@ impl Simulator {
         evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
         evm.env.tx.gas_limit = 500_000;
 
-        if evm.transact_commit().is_err() {
-            return Ok((
-                false,
-                U256::zero(),
-                U256::zero(),
-                "Buy Reverted".to_string(),
-                0,
-                0,
-            ));
+        // [修复] 正确捕获 Swap 交易的 Revert 原因
+        let buy_result = evm.transact_commit();
+        match buy_result {
+            Ok(ExecutionResult::Success { .. }) => {
+                // Swap 成功，继续检查余额
+            }
+            Ok(ExecutionResult::Revert { output, .. }) => {
+                let reason = decode_revert_reason(&output);
+                println!("      [Sim] Buy Tx Reverted: {}", reason);
+                return Ok((
+                    false,
+                    U256::zero(),
+                    U256::zero(),
+                    format!("Buy Reverted: {}", reason),
+                    0,
+                    0,
+                ));
+            }
+            _ => {
+                println!("      [Sim] Buy Tx Failed (System/Halt)");
+                return Ok((
+                    false,
+                    U256::zero(),
+                    U256::zero(),
+                    "Buy Failed (System)".to_string(),
+                    0,
+                    0,
+                ));
+            }
         }
 
         let balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;

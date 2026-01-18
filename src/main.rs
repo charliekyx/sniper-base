@@ -297,14 +297,14 @@ async fn execute_buy_and_approve(
     client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     nonce_manager: Arc<NonceManager>,
     router_addr: Address,
-    token_in: Address,
-    token_out: Address,
+    path: Vec<Address>,
     amount_in: U256,
     amount_out_min: U256,
     config: &AppConfig,
     fee: u32,                     // Added fee for V3
     v4_pool_key: Option<PoolKey>, // [新增] V4 PoolKey
 ) -> anyhow::Result<()> {
+    let token_out = *path.last().expect("Path must not be empty");
     println!(
         ">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...",
         token_out
@@ -470,13 +470,10 @@ async fn execute_buy_and_approve(
             vec![aero_swap_func],
         );
         let router = BaseContract::from(aero_swap_abi);
-        let route = (
-            token_in,
-            token_out,
-            false, // stable
-            *AERODROME_FACTORY,
-        );
-        let routes = vec![route];
+        let mut routes = Vec::new();
+        for i in 0..path.len() - 1 {
+            routes.push((path[i], path[i + 1], false, *AERODROME_FACTORY));
+        }
         router.encode(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
             (amount_out_min, routes, client.address(), deadline),
@@ -525,9 +522,10 @@ async fn execute_buy_and_approve(
             vec![aero_swap_func],
         );
         let router = BaseContract::from(aero_swap_abi);
-        let route1 = (*WETH_BASE, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
-        let route2 = (*VIRTUALS_ROUTER, token_out, false, *AERODROME_FACTORY);
-        let routes = vec![route1, route2];
+        let mut routes = Vec::new();
+        for i in 0..path.len() - 1 {
+            routes.push((path[i], path[i + 1], false, *AERODROME_FACTORY));
+        }
 
         // Note: We send transaction to AERODROME_ROUTER, not VIRTUALS_ROUTER
         // But this function takes `router_addr` which is VIRTUALS_ROUTER.
@@ -611,7 +609,6 @@ async fn execute_buy_and_approve(
             vec![func],
         );
         let router = BaseContract::from(router_abi);
-        let path = vec![token_in, token_out];
         router.encode(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
             (amount_out_min, path, client.address(), deadline),
@@ -1714,9 +1711,15 @@ async fn process_transaction(
             );
 
             // [Strategy Upgrade] Expanded Search for Clanker V4
-            let mut strategies: Vec<(Address, Option<PoolKey>, String)> = Vec::new();
+            let mut strategies: Vec<(Address, Option<PoolKey>, Option<Vec<Address>>, String)> =
+                Vec::new();
             if let Some(pk) = v4_pool_key {
-                strategies.push((*UNIVERSAL_ROUTER, Some(pk), "Extracted V4 Key".to_string()));
+                strategies.push((
+                    *UNIVERSAL_ROUTER,
+                    Some(pk),
+                    None,
+                    "Extracted V4 Key".to_string(),
+                ));
             }
 
             let token0 = if token_addr < *WETH_BASE {
@@ -1736,6 +1739,7 @@ async fn process_transaction(
             strategies.push((
                 *UNIVERSAL_ROUTER,
                 Some((token0, token1, 10000, 200, *CLANKER_HOOK_STATIC)),
+                None,
                 "Guess Clanker V4 (Static 1% / Tick 200)".to_string(),
             ));
 
@@ -1743,6 +1747,7 @@ async fn process_transaction(
             strategies.push((
                 *UNIVERSAL_ROUTER,
                 Some((token0, token1, 3000, 60, *CLANKER_HOOK_STATIC)),
+                None,
                 "Guess Clanker V4 (Static 0.3% / Tick 60)".to_string(),
             ));
 
@@ -1751,6 +1756,7 @@ async fn process_transaction(
             strategies.push((
                 *UNIVERSAL_ROUTER,
                 Some((token0, token1, 8388608, 200, *CLANKER_HOOK_DYNAMIC)),
+                None,
                 "Guess Clanker V4 (Dynamic / Tick 200)".to_string(),
             ));
 
@@ -1758,33 +1764,56 @@ async fn process_transaction(
             strategies.push((
                 *UNIVERSAL_ROUTER,
                 Some((token0, token1, 10000, 200, *CLANKER_HOOK_STATIC_V4_0)),
+                None,
                 "Guess Clanker V4.0 (Static 1% / Tick 200)".to_string(),
             ));
             strategies.push((
                 *UNIVERSAL_ROUTER,
                 Some((token0, token1, 8388608, 200, *CLANKER_HOOK_DYNAMIC_V4_0)),
+                None,
                 "Guess Clanker V4.0 (Dynamic / Tick 200)".to_string(),
             ));
 
-            strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
-            strategies.push((*PANCAKESWAP_V3_ROUTER, None, "PancakeSwap V3".to_string()));
-            strategies.push((*VIRTUALS_ROUTER, None, "Virtuals Protocol".to_string()));
+            strategies.push((*UNIV3_ROUTER, None, None, "Uniswap V3".to_string()));
+            strategies.push((
+                *PANCAKESWAP_V3_ROUTER,
+                None,
+                None,
+                "PancakeSwap V3".to_string(),
+            ));
+
+            // [Strategy] Aerodrome Direct
+            strategies.push((
+                *AERODROME_ROUTER,
+                None,
+                Some(vec![*WETH_BASE, token_addr]),
+                "Aerodrome V2 (Direct)".to_string(),
+            ));
+            // [Strategy] Aerodrome Hop (Virtuals)
+            strategies.push((
+                *AERODROME_ROUTER,
+                None,
+                Some(vec![*WETH_BASE, *VIRTUALS_ROUTER, token_addr]),
+                "Aerodrome V2 (Virtuals Hop)".to_string(),
+            ));
+
             strategies.push((
                 *VIRTUALS_FACTORY_ROUTER,
                 None,
+                None,
                 "Virtuals (Factory)".to_string(),
             ));
-            strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
-            strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
-            strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));
-            strategies.push((*SUSHI_ROUTER, None, "SushiSwap V2".to_string()));
-            strategies.push((*SWAPBASED_ROUTER, None, "SwapBased V2".to_string()));
-            strategies.push((*ROCKETSWAP_ROUTER, None, "RocketSwap V2".to_string()));
+            strategies.push((*BASESWAP_ROUTER, None, None, "BaseSwap V2".to_string()));
+            strategies.push((*ALIENBASE_ROUTER, None, None, "AlienBase V2".to_string()));
+            strategies.push((*SUSHI_ROUTER, None, None, "SushiSwap V2".to_string()));
+            strategies.push((*SWAPBASED_ROUTER, None, None, "SwapBased V2".to_string()));
+            strategies.push((*ROCKETSWAP_ROUTER, None, None, "RocketSwap V2".to_string()));
 
             println!("   [Strategy] Scanning markets for liquidity...");
             let mut debug_errors = Vec::new();
+            let mut best_path = vec![*WETH_BASE, token_addr]; // Default
 
-            for (router, key, desc) in strategies {
+            for (router, key, path, desc) in strategies {
                 effective_router = router;
                 println!("   [Strategy] Attempting: {} (Router: {:?})", desc, router);
                 let sim_res = simulator
@@ -1795,6 +1824,7 @@ async fn process_transaction(
                         buy_amt,
                         token_addr,
                         key, // 使用当前策略的 Key (可能是提取的，可能是猜的，也可能是 None)
+                        path.clone(),
                     )
                     .await;
 
@@ -1813,6 +1843,21 @@ async fn process_transaction(
                             if key.is_some() {
                                 v4_pool_key = key;
                             }
+                            if let Some(p) = path {
+                                best_path = p;
+                            }
+
+                            // [修复] 严格模式：如果模拟结果显示会亏损（Sellable but Loss），
+                            // 除非是极小额测试，否则这通常意味着有税。
+                            if sim_result_tuple.3 == "Sellable but Loss" {
+                                println!("      [WARN] Strategy yields immediate loss (Tax/Gas).");
+                                // 如果你希望更安全，可以在这里取消注释下面的代码来跳过此类交易：
+                                // if !config.shadow_mode {
+                                //     println!("      [SKIP] Skipping due to immediate loss risk.");
+                                //     continue;
+                                // }
+                            }
+
                             break;
                         } else {
                             debug_errors.push(format!("[{}: {}]", desc, sim_result_tuple.3));
@@ -1873,8 +1918,7 @@ async fn process_transaction(
                 client.clone(),
                 nonce_manager,
                 effective_router,
-                *WETH_BASE,
-                token_addr,
+                best_path,
                 buy_amt,
                 expected_tokens * 80 / 100, // 20% Slippage
                 &config,
@@ -1951,13 +1995,21 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
     // 2. 模拟测试 (WETH -> USDC on Aerodrome) 验证模拟引擎是否正常
     // Change to AERO (0x940181a94A35A4569E4529A3CDfB74e38FD98631) which definitely has a volatile pool
     if let Ok(test_token) = Address::from_str("0x940181a94A35A4569E4529A3CDfB74e38FD98631") {
-        let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
+        let amount_in = U256::from(50000000000000000u64); // 0.05 ETH (Increased to avoid gas loss false positive)
 
         println!("   [TEST] Simulating WETH -> AERO (Aerodrome) to verify engine...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let sim_res = simulator
-            .simulate_bundle(origin, None, *AERODROME_ROUTER, amount_in, test_token, None)
+            .simulate_bundle(
+                origin,
+                None,
+                *AERODROME_ROUTER,
+                amount_in,
+                test_token,
+                None,
+                None,
+            )
             .await;
 
         match sim_res {
@@ -1978,12 +2030,12 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
     // 3. 模拟测试 (WETH -> USDC on Uniswap V3) 验证 V3 逻辑
     // USDC: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
     if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
-        let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
+        let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
         println!("   [TEST] Simulating WETH -> USDC (Uniswap V3) to verify V3 logic...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let sim_res = simulator
-            .simulate_bundle(origin, None, *UNIV3_ROUTER, amount_in, usdc, None)
+            .simulate_bundle(origin, None, *UNIV3_ROUTER, amount_in, usdc, None, None)
             .await;
 
         match sim_res {
@@ -2004,7 +2056,7 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
     // 4. 模拟测试 (V4 Quoter) 验证 V4 ABI 编码
     // 我们尝试 Quote 一个 V4 池子，只要返回的是合约错误(Revert)而不是系统错误(Invalid Data)，就说明 ABI 编码是完美的
     if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
-        let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
+        let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
         println!("   [TEST] Simulating V4 Quote (WETH -> USDC) to verify ABI encoding...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
         // 构造一个测试用的 PoolKey
@@ -2018,6 +2070,7 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
                 amount_in,
                 usdc,
                 v4_pool_key,
+                None,
             )
             .await;
 
@@ -2038,7 +2091,7 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
     // 我们尝试对一个随机地址进行 Virtuals Buy 模拟。
     // 预期结果：合约应该 Revert (例如 "Subject not found" 或类似的)，这证明我们成功调用了合约。
     {
-        let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
+        let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
         println!("   [TEST] Simulating Virtuals Buy (Random Token) to verify ABI...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
         // Random token address
@@ -2051,6 +2104,7 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
                 *VIRTUALS_ROUTER,
                 amount_in,
                 random_token,
+                None,
                 None,
             )
             .await;

@@ -118,6 +118,7 @@ impl Simulator {
         amount_in_eth: U256,
         token_out: Address,
         v4_pool_key: Option<(Address, Address, u32, i32, Address)>, // [新增] V4 PoolKey
+        explicit_path: Option<Vec<Address>>,                        // [新增] 显式路径，用于多跳策略
     ) -> Result<(bool, U256, U256, String, u64, u32)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
         let block = self
@@ -465,7 +466,11 @@ impl Simulator {
         evm.env.block.timestamp =
             rU256::from_limbs(block_timestamp.0).saturating_add(rU256::from(12));
 
-        let path = vec![*WETH_BASE, token_out];
+        let path = if let Some(p) = explicit_path {
+            p
+        } else {
+            vec![*WETH_BASE, token_out]
+        };
 
         // [新增] V3 费率探测逻辑
         let mut best_fee = 0u32;
@@ -562,30 +567,20 @@ impl Simulator {
         } else if router_addr == *AERODROME_ROUTER {
             let aero_router = BaseContract::from(aero_abi.clone());
             // 构造 Aerodrome 的 Route 结构体: (from, to, stable, factory)
-            // stable = false (通常土狗都是非稳定币池)
-            let route = (
-                *WETH_BASE,         // from
-                token_out,          // to
-                false,              // stable
-                *AERODROME_FACTORY, // factory
-            );
-            let routes = vec![route];
+            // [修改] 支持多跳路径构造
+            let mut routes = Vec::new();
+            for i in 0..path.len() - 1 {
+                routes.push((path[i], path[i + 1], false, *AERODROME_FACTORY));
+            }
             aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
         } else {
             if router_addr == *VIRTUALS_ROUTER {
-                // [Strategy] Virtuals Multihop: ETH -> VIRTUAL -> Token (via Aerodrome)
-                // We use the VIRTUALS_ROUTER constant (which is the VIRTUAL token address) as a flag.
-                // But we execute against AERODROME_ROUTER.
-
+                // [Deprecated] Logic moved to explicit_path strategy in main.rs
+                // But kept here for backward compatibility if explicit_path is None
                 let aero_router = BaseContract::from(aero_abi.clone());
-                // Route 1: WETH -> VIRTUAL
                 let route1 = (*WETH_BASE, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
-                // Route 2: VIRTUAL -> Token
                 let route2 = (*VIRTUALS_ROUTER, token_out, false, *AERODROME_FACTORY);
-
                 let routes = vec![route1, route2];
-
-                // We use Aerodrome's getAmountsOut
                 aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
             } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
                 // Virtuals Protocol Quote (Direct)
@@ -912,8 +907,10 @@ impl Simulator {
                 vec![aero_swap_func],
             );
             let aero_router = BaseContract::from(aero_swap_abi.clone());
-            let route = (*WETH_BASE, token_out, false, *AERODROME_FACTORY);
-            let routes = vec![route];
+            let mut routes = Vec::new();
+            for i in 0..path.len() - 1 {
+                routes.push((path[i], path[i + 1], false, *AERODROME_FACTORY));
+            }
             aero_router.encode(
                 "swapExactETHForTokensSupportingFeeOnTransferTokens",
                 (
@@ -1016,12 +1013,7 @@ impl Simulator {
             // 标准 V2
             router.encode(
                 "swapExactETHForTokensSupportingFeeOnTransferTokens",
-                (
-                    U256::zero(),
-                    path.clone(),
-                    Address::from(my_wallet.0 .0),
-                    deadline,
-                ),
+                (U256::zero(), path, Address::from(my_wallet.0 .0), deadline),
             )?
         };
 
@@ -1277,16 +1269,16 @@ impl Simulator {
             // 计算亏损金额
             let loss = initial_eth - final_eth;
             let invest_amt = rU256::from_limbs(amount_in_eth.0);
-            // 允许最大 20% 的亏损 (包括 Gas 和 滑点)
-            // 如果亏损超过 20%，说明可能是貔貅(高税)或者深度太浅，直接标记为失败
-            let max_loss = invest_amt * rU256::from(20) / rU256::from(100);
+            // [修复] 收紧亏损阈值：从 20% 降低到 10%
+            // 对于狙击机器人，超过 10% 的即时亏损通常意味着高税或貔貅风险
+            let max_loss = invest_amt * rU256::from(10) / rU256::from(100);
 
             if loss > max_loss {
                 Ok((
                     false,
                     U256::zero(),
                     expected_tokens,
-                    "High Tax/Loss (>20%)".to_string(),
+                    "High Tax/Loss (>10%)".to_string(),
                     gas_used,
                     best_fee,
                 ))

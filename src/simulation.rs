@@ -1,6 +1,7 @@
 use crate::constants::{
     AERODROME_FACTORY, AERODROME_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
-    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_ROUTER, WETH_BASE,
+    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_FACTORY_ROUTER,
+    VIRTUALS_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
 use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
@@ -586,6 +587,44 @@ impl Simulator {
 
                 // We use Aerodrome's getAmountsOut
                 aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
+            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+                // Virtuals Protocol Quote (Direct)
+                // buy(address token, uint256 amountIn, uint256 minAmountOut)
+                #[allow(deprecated)]
+                let virtuals_buy_func = Function {
+                    name: "buy".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "token".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amountIn".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "minAmountOut".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![Param {
+                        name: "amountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    }],
+                    constant: None,
+                    state_mutability: StateMutability::Payable,
+                };
+                let mut virtuals_abi = Abi::default();
+                virtuals_abi
+                    .functions
+                    .insert("buy".to_string(), vec![virtuals_buy_func]);
+                let v_router = BaseContract::from(virtuals_abi);
+
+                v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
             } else {
                 // [修复] 如果是 Universal Router 且没有 PoolKey，直接报错，不要尝试调用 V2 方法
                 if router_addr == *UNIVERSAL_ROUTER {
@@ -614,6 +653,8 @@ impl Simulator {
             }
         } else if router_addr == *VIRTUALS_ROUTER {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
+        } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(VIRTUALS_FACTORY_ROUTER.0));
         } else {
             evm.env.tx.transact_to = TransactTo::Call(revm_router);
         }
@@ -672,6 +713,17 @@ impl Simulator {
                         .last()
                         .cloned()
                         .unwrap_or_default()
+                } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+                    // Decode Virtuals buy result
+                    let v_router = BaseContract::from(
+                        ethers::abi::parse_abi(&[
+                            "function buy(address,uint256,uint256) returns (uint256)",
+                        ])
+                        .unwrap(),
+                    );
+                    v_router
+                        .decode_output::<U256, _>("buy", b)
+                        .unwrap_or(U256::zero())
                 } else {
                     let decoder = if router_addr == *AERODROME_ROUTER {
                         BaseContract::from(aero_abi.clone())
@@ -737,7 +789,10 @@ impl Simulator {
 
         // [新增] 如果 Quote 结果为 0，直接终止，不要尝试买入（节省资源并减少误报）
         // [Fix] For Virtuals, the buy function might not return the amount (void), so we proceed even if 0 to check balance change
-        if expected_tokens.is_zero() && router_addr != *VIRTUALS_ROUTER {
+        if expected_tokens.is_zero()
+            && router_addr != *VIRTUALS_ROUTER
+            && router_addr != *VIRTUALS_FACTORY_ROUTER
+        {
             return Ok((
                 false,
                 U256::zero(),
@@ -919,6 +974,44 @@ impl Simulator {
                     deadline,
                 ),
             )?
+        } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            // Virtuals Buy (Direct)
+            #[allow(deprecated)]
+            let virtuals_buy_func = Function {
+                name: "buy".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "token".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "amountIn".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "minAmountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: None,
+                state_mutability: StateMutability::Payable,
+            };
+            let mut virtuals_abi = Abi::default();
+            virtuals_abi
+                .functions
+                .insert("buy".to_string(), vec![virtuals_buy_func]);
+            let v_router = BaseContract::from(virtuals_abi);
+
+            // We use the same encoding as the quote step
+            v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
         } else {
             // 标准 V2
             router.encode(
@@ -936,6 +1029,8 @@ impl Simulator {
         evm.env.tx.transact_to = TransactTo::Call(revm_router);
         if router_addr == *VIRTUALS_ROUTER {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
+        } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(VIRTUALS_FACTORY_ROUTER.0));
         }
         evm.env.tx.data = buy_calldata.0.into();
         evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
@@ -1006,7 +1101,11 @@ impl Simulator {
         }
 
         // 只有当 expected_tokens > 0 时才检查滑点，否则（盲买）跳过此检查
-        if !expected_tokens.is_zero() && token_balance * 10 < expected_tokens * 8 {
+        if !expected_tokens.is_zero()
+            && token_balance * 10 < expected_tokens * 8
+            && router_addr != *VIRTUALS_ROUTER
+            && router_addr != *VIRTUALS_FACTORY_ROUTER
+        {
             return Ok((
                 false,
                 U256::zero(),
@@ -1153,51 +1252,10 @@ impl Simulator {
                 0,
             ));
         }
-
-        // Check for Revert in Sell
-        if let Ok(ExecutionResult::Revert { output, .. }) = &sell_result {
-            let reason = decode_revert_reason(output);
-            return Ok((
-                false,
-                U256::zero(),
-                expected_tokens,
-                format!("Sell Reverted: {}", reason),
-                0,
-                0,
-            ));
-        }
-
         let gas_used = match sell_result.unwrap() {
             ExecutionResult::Success { gas_used, .. } => gas_used,
             _ => 0,
         };
-
-        // [Fix] Unwrap WETH if we are using V3 (exactInputSingle does not unwrap)
-        if is_v3 {
-            // Check WETH balance
-            let weth_balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
-            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(WETH_BASE.0));
-            evm.env.tx.data = weth_balance_calldata.0.into();
-
-            if let Ok(ExecutionResult::Success {
-                output: Output::Call(b),
-                ..
-            }) = evm.transact_commit()
-            {
-                let weth_bal: U256 = token.decode_output("balanceOf", b).unwrap_or_default();
-                if !weth_bal.is_zero() {
-                    // withdraw(uint256)
-                    let withdraw_sig = ethers::utils::id("withdraw(uint256)")[0..4].to_vec();
-                    let withdraw_data = Bytes::from(
-                        [withdraw_sig, ethers::abi::encode(&[Token::Uint(weth_bal)])].concat(),
-                    );
-
-                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(WETH_BASE.0));
-                    evm.env.tx.data = withdraw_data.0.into();
-                    evm.transact_commit().ok();
-                }
-            }
-        }
 
         let final_eth = cache_db
             .basic(my_wallet)

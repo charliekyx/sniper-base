@@ -9,8 +9,8 @@ use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
     CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_DYNAMIC_V4_0, CLANKER_HOOK_STATIC, CLANKER_HOOK_STATIC_V4_0,
     PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER, ROCKETSWAP_ROUTER, SUSHI_ROUTER,
-    SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_ROUTER,
-    WETH_BASE,
+    SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
+    VIRTUALS_FACTORY_ROUTER, VIRTUALS_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -536,6 +536,44 @@ async fn execute_buy_and_approve(
             "swapExactETHForTokensSupportingFeeOnTransferTokens",
             (amount_out_min, routes, client.address(), deadline),
         )?
+    } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+        // Virtuals Protocol Buy (Direct via Factory/Bonding Curve)
+        // Assuming buy(address token, uint256 amountIn, uint256 minAmountOut)
+        #[allow(deprecated)]
+        let virtuals_buy_func = Function {
+            name: "buy".to_string(),
+            inputs: vec![
+                Param {
+                    name: "token".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "amountIn".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "minAmountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            }],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        let mut virtuals_abi = Abi::default();
+        virtuals_abi
+            .functions
+            .insert("buy".to_string(), vec![virtuals_buy_func]);
+        let router = BaseContract::from(virtuals_abi);
+
+        router.encode("buy", (token_out, amount_in, amount_out_min))?
     } else {
         // 标准 V2
         let mut router_abi = Abi::default();
@@ -928,6 +966,44 @@ async fn execute_smart_sell(
                     "swapExactTokensForETHSupportingFeeOnTransferTokens",
                     (amt, U256::zero(), routes, client.address(), deadline),
                 )?
+            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+                // Virtuals Protocol Sell (Direct via Factory)
+                // sell(address token, uint256 amountIn, uint256 minAmountOut)
+                #[allow(deprecated)]
+                let virtuals_sell_func = Function {
+                    name: "sell".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "token".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amountIn".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "minAmountOut".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![Param {
+                        name: "amountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    }],
+                    constant: None,
+                    state_mutability: StateMutability::NonPayable,
+                };
+                let mut virtuals_abi = Abi::default();
+                virtuals_abi
+                    .functions
+                    .insert("sell".to_string(), vec![virtuals_sell_func]);
+                let router = BaseContract::from(virtuals_abi);
+
+                router.encode("sell", (token_in, amt, U256::zero()))?
             } else {
                 // 标准 V2
                 let mut router_abi = Abi::default();
@@ -1317,6 +1393,51 @@ async fn monitor_position(
                     continue;
                 }
             }
+        } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            // Virtuals Price Check (Direct)
+            // getSellPrice(address token, uint256 amount) returns (uint256 ethAmount)
+            #[allow(deprecated)]
+            let get_sell_price_func = Function {
+                name: "getSellPrice".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "token".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "amount".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![Param {
+                    name: "price".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: Some(true),
+                state_mutability: StateMutability::View,
+            };
+            let mut v_abi = Abi::default();
+            v_abi
+                .functions
+                .insert("getSellPrice".to_string(), vec![get_sell_price_func]);
+            let v_contract = Contract::new(router_addr, v_abi, client.clone());
+
+            match v_contract.method::<_, U256>("getSellPrice", (token_addr, balance)) {
+                Ok(m) => match m.call().await {
+                    Ok(val) => val,
+                    Err(_) => {
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
+                },
+                Err(_) => {
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
         } else {
             match router_contract.method::<_, Vec<U256>>("getAmountsOut", (balance, path.clone())) {
                 Ok(m) => match m.call().await {
@@ -1648,6 +1769,11 @@ async fn process_transaction(
             strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
             strategies.push((*PANCAKESWAP_V3_ROUTER, None, "PancakeSwap V3".to_string()));
             strategies.push((*VIRTUALS_ROUTER, None, "Virtuals Protocol".to_string()));
+            strategies.push((
+                *VIRTUALS_FACTORY_ROUTER,
+                None,
+                "Virtuals (Factory)".to_string(),
+            ));
             strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
             strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
             strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));

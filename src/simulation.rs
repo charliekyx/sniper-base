@@ -49,7 +49,7 @@ fn decode_revert_reason(output: &[u8]) -> String {
                 }
                 // [新增] 捕获 Clanker V4 的常见自定义错误 (0x486aa307)
                 if inner_bytes.starts_with(&[0x48, 0x6a, 0xa3, 0x07]) {
-                    return "Revert: V4 Pool Error (486aa307)".to_string();
+                    return "Revert: V4 Pool Not Found (486aa307)".to_string();
                 }
                 return format!("Revert(V4): {}", ethers::utils::hex::encode(inner_bytes));
             }
@@ -709,6 +709,7 @@ impl Simulator {
                 ParamType::Uint(256), // amountOutMinimum
                 ParamType::Uint(160), // sqrtPriceLimitX96
             ]);
+
             #[allow(deprecated)]
             let v3_swap_func = Function {
                 name: "exactInputSingle".to_string(),
@@ -725,24 +726,22 @@ impl Simulator {
                 constant: None,
                 state_mutability: StateMutability::Payable,
             };
-            let mut v3_swap_abi = Abi::default();
-            v3_swap_abi
-                .functions
-                .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
-            let v3_router = BaseContract::from(v3_swap_abi);
 
-            // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
-            let params = (
-                *WETH_BASE,
-                token_out,
-                best_fee,
-                Address::from(my_wallet.0 .0),
-                deadline,
-                amount_in_eth,
-                U256::zero(),
-                U256::zero(),
-            );
-            v3_router.encode("exactInputSingle", (params,))?
+            // [修复] 手动构建 Token::Tuple 以确保 V3 Swap 编码正确
+            // 结构体顺序: tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96
+            let params_token = Token::Tuple(vec![
+                Token::Address(*WETH_BASE),
+                Token::Address(token_out),
+                Token::Uint(U256::from(best_fee)),
+                Token::Address(Address::from(my_wallet.0 .0)),
+                Token::Uint(deadline),
+                Token::Uint(amount_in_eth),
+                Token::Uint(U256::zero()), // amountOutMinimum
+                Token::Uint(U256::zero()), // sqrtPriceLimitX96
+            ]);
+
+            let encoded = v3_swap_func.encode_input(&[params_token])?;
+            Bytes::from(encoded)
         } else if router_addr == *AERODROME_ROUTER {
             // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
             #[allow(deprecated)]

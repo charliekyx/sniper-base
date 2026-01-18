@@ -11,8 +11,8 @@ use ethers::types::{Address, Bytes, Transaction, U256};
 use revm::{
     db::{CacheDB, DatabaseRef, EthersDB},
     primitives::{
-        AccountInfo, Address as rAddress, Bytecode, ExecutionResult, Output, TransactTo,
-        B256 as rB256, U256 as rU256,
+        AccountInfo, Address as rAddress, Bytecode, ExecutionResult, Output, ResultAndState,
+        TransactTo, B256 as rB256, U256 as rU256,
     },
     Database, EVM,
 };
@@ -534,10 +534,14 @@ impl Simulator {
                 evm.env.tx.data = calldata.0.clone().into();
                 evm.env.tx.caller = my_wallet;
 
-                if let Ok(ExecutionResult::Success {
-                    output: Output::Call(b),
+                if let Ok(ResultAndState {
+                    result:
+                        ExecutionResult::Success {
+                            output: Output::Call(b),
+                            ..
+                        },
                     ..
-                }) = evm.transact_commit()
+                }) = evm.transact()
                 {
                     // 如果成功解码出 amountOut > 0，说明这个费率有流动性
                     if let Ok((amount_out, _, _, _)) = quoter
@@ -1311,6 +1315,10 @@ impl Simulator {
             let max_loss = invest_amt * rU256::from(10) / rU256::from(100);
 
             if loss > max_loss {
+                println!(
+                    "      [Sim] High Loss: Initial={} Final={} Loss={} Max={}",
+                    initial_eth, final_eth, loss, max_loss
+                );
                 Ok((
                     false,
                     U256::zero(),

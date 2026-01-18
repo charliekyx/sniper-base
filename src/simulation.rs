@@ -111,6 +111,12 @@ impl Simulator {
         v4_pool_key: Option<(Address, Address, u32, i32, Address)>, // [新增] V4 PoolKey
     ) -> Result<(bool, U256, U256, String, u64, u32)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
+        let block = self
+            .provider
+            .get_block(block_number)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Failed to fetch block"))?;
+        let block_timestamp = block.timestamp;
 
         // [修改] EthersDB 也要适配 Ipc
         let ethers_db = EthersDB::new(self.provider.clone(), Some(block_number.into()))
@@ -430,6 +436,8 @@ impl Simulator {
 
         evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(block_number + 1);
+        evm.env.block.timestamp =
+            rU256::from_limbs(block_timestamp.0).saturating_add(rU256::from(12));
 
         let path = vec![*WETH_BASE, token_out];
 
@@ -1075,6 +1083,13 @@ impl Simulator {
             self.provider.get_block_number().await?.as_u64()
         };
 
+        let block = self
+            .provider
+            .get_block(sim_block)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Failed to fetch sim block"))?;
+        let block_timestamp = block.timestamp;
+
         // 创建临时的 EthersDB 用于此次模拟
         let ethers_db = EthersDB::new(self.provider.clone(), Some(sim_block.into()))
             .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
@@ -1104,6 +1119,8 @@ impl Simulator {
 
         evm.env.cfg.chain_id = 8453;
         evm.env.block.number = rU256::from(sim_block + 1);
+        evm.env.block.timestamp =
+            rU256::from_limbs(block_timestamp.0).saturating_add(rU256::from(12));
 
         // 构造模拟交易环境
         evm.env.tx.caller = caller;

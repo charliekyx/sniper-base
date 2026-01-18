@@ -678,15 +678,21 @@ impl Simulator {
             ));
         }
 
-        let result_amounts = match evm.transact_commit() {
-            Ok(result) => result,
-            Err(_) => {
-                // 如果 getAmountsOut 失败（例如池子不存在），我们不直接退出
-                // 而是标记 expected_tokens 为 0，继续尝试执行买入，看是否能成功
-                ExecutionResult::Revert {
+        let result_amounts = if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            match evm.transact() {
+                Ok(res) => res.result,
+                Err(_) => ExecutionResult::Revert {
                     gas_used: 0,
                     output: vec![].into(),
-                }
+                },
+            }
+        } else {
+            match evm.transact_commit() {
+                Ok(result) => result,
+                Err(_) => ExecutionResult::Revert {
+                    gas_used: 0,
+                    output: vec![].into(),
+                },
             }
         };
 

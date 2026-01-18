@@ -47,6 +47,10 @@ fn decode_revert_reason(output: &[u8]) -> String {
                 if inner_bytes.starts_with(&[0x86, 0xaa, 0x30, 0x70]) {
                     return "Revert: PoolNotInitialized (V4)".to_string();
                 }
+                // [新增] 捕获 Clanker V4 的常见自定义错误 (0x486aa307)
+                if inner_bytes.starts_with(&[0x48, 0x6a, 0xa3, 0x07]) {
+                    return "Revert: V4 Pool Error (486aa307)".to_string();
+                }
                 return format!("Revert(V4): {}", ethers::utils::hex::encode(inner_bytes));
             }
         }
@@ -652,6 +656,18 @@ impl Simulator {
             expected_tokens
         );
 
+        // [新增] 如果 Quote 结果为 0，直接终止，不要尝试买入（节省资源并减少误报）
+        if expected_tokens.is_zero() {
+            return Ok((
+                false,
+                U256::zero(),
+                U256::zero(),
+                "Zero Liquidity (Quote=0)".to_string(),
+                0,
+                0,
+            ));
+        }
+
         let deadline = U256::from(9999999999u64);
 
         // [修改] 针对 Aerodrome 的买入编码
@@ -792,7 +808,7 @@ impl Simulator {
         evm.env.tx.transact_to = TransactTo::Call(revm_router);
         evm.env.tx.data = buy_calldata.0.into();
         evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
-        evm.env.tx.gas_limit = 500_000;
+        evm.env.tx.gas_limit = 1_000_000; // [优化] 提高 Gas Limit
 
         // [修复] 正确捕获 Swap 交易的 Revert 原因
         let buy_result = evm.transact_commit();
@@ -807,7 +823,7 @@ impl Simulator {
                     false,
                     U256::zero(),
                     U256::zero(),
-                    format!("Buy Reverted: {}", reason),
+                    format!("[HONEYPOT/RESTRICTED] Buy Reverted: {}", reason), // [优化] 明确标记
                     0,
                     0,
                 ));

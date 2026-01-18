@@ -658,7 +658,12 @@ impl Simulator {
             evm.env.tx.transact_to = TransactTo::Call(revm_router);
         }
         evm.env.tx.data = amounts_out_calldata.0.into();
-        evm.env.tx.value = rU256::ZERO;
+        // [修复] Virtuals Factory 的 Quote (buy) 需要发送 ETH
+        if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
+        } else {
+            evm.env.tx.value = rU256::ZERO;
+        }
         evm.env.tx.gas_limit = 500_000;
 
         // [修改] 如果 calldata 为空（比如 V3 没找到池子），直接返回错误

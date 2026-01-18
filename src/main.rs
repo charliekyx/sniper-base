@@ -391,7 +391,6 @@ async fn execute_buy_and_approve(
             ParamType::Address,   // tokenOut
             ParamType::Uint(24),  // fee
             ParamType::Address,   // recipient
-            ParamType::Uint(256), // deadline
             ParamType::Uint(256), // amountIn
             ParamType::Uint(256), // amountOutMinimum
             ParamType::Uint(160), // sqrtPriceLimitX96
@@ -423,7 +422,6 @@ async fn execute_buy_and_approve(
             token_out,
             fee,
             client.address(),
-            deadline,
             amount_in,
             amount_out_min,
             U256::zero(),
@@ -716,7 +714,6 @@ async fn execute_smart_sell(
                     ParamType::Address,   // tokenOut
                     ParamType::Uint(24),  // fee
                     ParamType::Address,   // recipient
-                    ParamType::Uint(256), // deadline
                     ParamType::Uint(256), // amountIn
                     ParamType::Uint(256), // amountOutMinimum
                     ParamType::Uint(160), // sqrtPriceLimitX96
@@ -748,7 +745,6 @@ async fn execute_smart_sell(
                     token_out,
                     fee,
                     client.address(),
-                    deadline,
                     amt,
                     U256::zero(),
                     U256::zero(),

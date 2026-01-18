@@ -704,7 +704,6 @@ impl Simulator {
                 ParamType::Address,   // tokenOut
                 ParamType::Uint(24),  // fee
                 ParamType::Address,   // recipient
-                ParamType::Uint(256), // deadline
                 ParamType::Uint(256), // amountIn
                 ParamType::Uint(256), // amountOutMinimum
                 ParamType::Uint(160), // sqrtPriceLimitX96
@@ -734,7 +733,6 @@ impl Simulator {
                 Token::Address(token_out),
                 Token::Uint(U256::from(best_fee)),
                 Token::Address(Address::from(my_wallet.0 .0)),
-                Token::Uint(deadline),
                 Token::Uint(amount_in_eth),
                 Token::Uint(U256::zero()), // amountOutMinimum
                 Token::Uint(U256::zero()), // sqrtPriceLimitX96
@@ -902,7 +900,6 @@ impl Simulator {
                 ParamType::Address,   // tokenOut
                 ParamType::Uint(24),  // fee
                 ParamType::Address,   // recipient
-                ParamType::Uint(256), // deadline
                 ParamType::Uint(256), // amountIn
                 ParamType::Uint(256), // amountOutMinimum
                 ParamType::Uint(160), // sqrtPriceLimitX96
@@ -934,7 +931,6 @@ impl Simulator {
                 *WETH_BASE,
                 best_fee,
                 Address::from(my_wallet.0 .0),
-                deadline,
                 token_balance,
                 U256::zero(),
                 U256::zero(),

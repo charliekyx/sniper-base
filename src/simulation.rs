@@ -39,6 +39,18 @@ fn decode_revert_reason(output: &[u8]) -> String {
             return format!("Panic Code: {}", decoded[0]);
         }
     }
+    // [新增] V4 QuoteFailure(bytes) selector: 0x6190b2b0
+    if output.starts_with(&[0x61, 0x90, 0xb2, 0xb0]) {
+        if let Ok(decoded) = ethers::abi::decode(&[ParamType::Bytes], &output[4..]) {
+            if let Some(inner_bytes) = decoded[0].clone().into_bytes() {
+                // PoolNotInitialized selector: 0x86aa3070
+                if inner_bytes.starts_with(&[0x86, 0xaa, 0x30, 0x70]) {
+                    return "Revert: PoolNotInitialized (V4)".to_string();
+                }
+                return format!("Revert(V4): {}", ethers::utils::hex::encode(inner_bytes));
+            }
+        }
+    }
     format!("Revert(Hex): {}", ethers::utils::hex::encode(output))
 }
 

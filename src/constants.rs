@@ -16,8 +16,11 @@ lazy_static! {
     // Uniswap V4 (Base)
     pub static ref UNIV4_POOL_MANAGER: Address = Address::from_str("0x498581fF718922c3f8e6A244956aF099B2652b2b").unwrap();
     pub static ref UNIV4_QUOTER: Address = Address::from_str("0x0d5e0f971ed27fbff6c2837bf31316121532048d").unwrap();
-    // Clanker V4 Factory (Used as Hook guess)
-    pub static ref CLANKER_FACTORY_V4: Address = Address::from_str("0xea8127533F7be6d04b3DBA8f0a496F2DCfd27728").unwrap();
+    // [Updated] Clanker V4.1 Hooks (Base)
+    // Static Fee Hook (Most common, usually 1%)
+    pub static ref CLANKER_HOOK_STATIC: Address = Address::from_str("0xb429d62f8f3bFFb98CdB9569533eA23bF0Ba28CC").unwrap();
+    // Dynamic Fee Hook (Fee flag 0x800000)
+    pub static ref CLANKER_HOOK_DYNAMIC: Address = Address::from_str("0xd60D6B218116cFd801E28F78d011a203D2b068Cc").unwrap();
 
     pub static ref AERODROME_FACTORY: Address = Address::from_str("0x420DD381b31aEf6683db6B902084cB0FFECe40Da").unwrap();
     pub static ref SUSHI_ROUTER: Address = Address::from_str("0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891").unwrap();
@@ -27,6 +30,10 @@ lazy_static! {
     pub static ref UNIVERSAL_ROUTER: Address = Address::from_str("0x743f2f29cdd66242fb27d292ab2cc92f45674635").unwrap();
     // deBridge Gate
     pub static ref DEBRIDGE_ROUTER: Address = Address::from_str("0x663dc15d3c1ac63ff12e45ab68fea3f0a883c251").unwrap();
+    // SwapBased Router (Base)
+    pub static ref SWAPBASED_ROUTER: Address = Address::from_str("0xaaa3b1F1bd7BCc97fD1917c18ade665C5D31F066").unwrap();
+    // RocketSwap Router (Base)
+    pub static ref ROCKETSWAP_ROUTER: Address = Address::from_str("0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {
@@ -40,6 +47,8 @@ lazy_static! {
         m.insert(*ODOS_ROUTER, "Odos".to_string());
         m.insert(*UNIVERSAL_ROUTER, "UniversalRouter".to_string());
         m.insert(*DEBRIDGE_ROUTER, "deBridge".to_string());
+        m.insert(*SWAPBASED_ROUTER, "SwapBased".to_string());
+        m.insert(*ROCKETSWAP_ROUTER, "RocketSwap".to_string());
         m
     };
 }

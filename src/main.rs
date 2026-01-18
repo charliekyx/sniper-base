@@ -7,8 +7,8 @@ mod simulation;
 use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
-    CLANKER_FACTORY_V4, SUSHI_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
-    WETH_BASE,
+    CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_STATIC, ROCKETSWAP_ROUTER, SUSHI_ROUTER, SWAPBASED_ROUTER,
+    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -1413,17 +1413,21 @@ async fn process_transaction(
                 token_addr
             };
 
-            // 1. 首选：Clanker 标准配置 (1% Fee, 200 Tick) - 最可能命中
+            // [Strategy Upgrade] Clanker V4.1 Strategies
+
+            // 1. Static Hook (Standard): 1% Fee (10000), Tick 200
             strategies.push((
                 *UNIVERSAL_ROUTER,
-                Some((token0, token1, 10000, 200, *CLANKER_FACTORY_V4)),
-                "Guess Clanker V4 (1% / Tick 200)".to_string(),
+                Some((token0, token1, 10000, 200, *CLANKER_HOOK_STATIC)),
+                "Guess Clanker V4 (Static 1% / Tick 200)".to_string(),
             ));
-            // 2. 备选：Clanker 激进配置 (1% Fee, 60 Tick) - 防止它使用更密的 Tick
+
+            // 2. Dynamic Hook: Fee Flag 0x800000 (8388608), Tick 200
+            // 注意：对于动态费率池，PoolKey 中的 fee 必须是 0x800000
             strategies.push((
                 *UNIVERSAL_ROUTER,
-                Some((token0, token1, 10000, 60, *CLANKER_FACTORY_V4)),
-                "Guess Clanker V4 (1% / Tick 60)".to_string(),
+                Some((token0, token1, 8388608, 200, *CLANKER_HOOK_DYNAMIC)),
+                "Guess Clanker V4 (Dynamic / Tick 200)".to_string(),
             ));
 
             strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
@@ -1431,6 +1435,8 @@ async fn process_transaction(
             strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
             strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));
             strategies.push((*SUSHI_ROUTER, None, "SushiSwap V2".to_string()));
+            strategies.push((*SWAPBASED_ROUTER, None, "SwapBased V2".to_string()));
+            strategies.push((*ROCKETSWAP_ROUTER, None, "RocketSwap V2".to_string()));
 
             println!("   [Strategy] Scanning markets for liquidity...");
             let mut debug_errors = Vec::new();

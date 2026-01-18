@@ -1619,22 +1619,22 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
     }
 
     // 2. 模拟测试 (WETH -> USDC on Aerodrome) 验证模拟引擎是否正常
-    // USDC on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
-    if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
+    // Change to AERO (0x940181a94A35A4569E4529A3CDfB74e38FD98631) which definitely has a volatile pool
+    if let Ok(test_token) = Address::from_str("0x940181a94A35A4569E4529A3CDfB74e38FD98631") {
         let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
 
-        println!("   [TEST] Simulating WETH -> USDC (Aerodrome) to verify engine...");
+        println!("   [TEST] Simulating WETH -> AERO (Aerodrome) to verify engine...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let sim_res = simulator
-            .simulate_bundle(origin, None, *AERODROME_ROUTER, amount_in, usdc, None)
+            .simulate_bundle(origin, None, *AERODROME_ROUTER, amount_in, test_token, None)
             .await;
 
         match sim_res {
             Ok((success, _, out, reason, _, _)) => {
                 if success {
                     println!(
-                        "   [PASS] Simulation Engine is working. Output: {} USDC",
+                        "   [PASS] Simulation Engine is working. Output: {} AERO",
                         out
                     );
                 } else {

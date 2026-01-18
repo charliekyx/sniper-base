@@ -42,7 +42,7 @@ lazy_static! {
     // RocketSwap Router (Base)
     pub static ref ROCKETSWAP_ROUTER: Address = Address::from_str("0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0").unwrap();
     // Virtuals Protocol (Base) - Agent Factory / Router
-    pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0x15e7903697e4d6D4498002967974657C6377077B").unwrap();
+    pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0xF8DD39c71A278FE9F4377D009D7627EF140f809e").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {

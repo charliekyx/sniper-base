@@ -1166,7 +1166,7 @@ impl Simulator {
             .unwrap()
             .balance;
 
-        if final_eth > initial_eth {
+        if final_eth >= initial_eth {
             Ok((
                 true,
                 U256::from((final_eth - initial_eth).to_be_bytes::<32>()),
@@ -1176,14 +1176,33 @@ impl Simulator {
                 best_fee,
             ))
         } else {
-            Ok((
-                true,
-                U256::zero(),
-                expected_tokens,
-                "Sellable but Loss".to_string(),
-                gas_used,
-                best_fee,
-            ))
+            // [修复] 增加亏损阈值检查
+            // 计算亏损金额
+            let loss = initial_eth - final_eth;
+            let invest_amt = rU256::from_limbs(amount_in_eth.0);
+            // 允许最大 20% 的亏损 (包括 Gas 和 滑点)
+            // 如果亏损超过 20%，说明可能是貔貅(高税)或者深度太浅，直接标记为失败
+            let max_loss = invest_amt * rU256::from(20) / rU256::from(100);
+
+            if loss > max_loss {
+                Ok((
+                    false,
+                    U256::zero(),
+                    expected_tokens,
+                    "High Tax/Loss (>20%)".to_string(),
+                    gas_used,
+                    best_fee,
+                ))
+            } else {
+                Ok((
+                    true,
+                    U256::zero(),
+                    expected_tokens,
+                    "Sellable but Loss".to_string(),
+                    gas_used,
+                    best_fee,
+                ))
+            }
         }
     }
 

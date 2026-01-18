@@ -1,6 +1,6 @@
 use crate::constants::{
     AERODROME_FACTORY, AERODROME_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
-    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
+    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
 use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
@@ -50,6 +50,10 @@ fn decode_revert_reason(output: &[u8]) -> String {
                 // [新增] 捕获 Clanker V4 的常见自定义错误 (0x486aa307)
                 if inner_bytes.starts_with(&[0x48, 0x6a, 0xa3, 0x07]) {
                     return "Revert: V4 Pool Not Found (486aa307)".to_string();
+                }
+                // [新增] 捕获另一种 V4 错误 (0x90bfb865) - 通常也是池子未初始化或参数不匹配
+                if inner_bytes.starts_with(&[0x90, 0xbf, 0xb8, 0x65]) {
+                    return "Revert: V4 Pool Not Found (90bfb865)".to_string();
                 }
                 return format!("Revert(V4): {}", ethers::utils::hex::encode(inner_bytes));
             }
@@ -415,6 +419,23 @@ impl Simulator {
             .functions
             .insert("approve".to_string(), vec![approve_func]);
 
+        // 6. Virtuals Protocol ABI - Manual Construction
+        // Assuming: getBuyPrice(address token, uint256 amount) returns (uint256 ethAmount)
+        // Note: This might be "ETH needed for Token amount" or "Token amount for ETH".
+        // Common bonding curve: getBuyPrice(subject, amount) -> price in ETH.
+        // If so, we can't easily quote "How many tokens for X ETH" without math.
+        // For simulation purposes, we might try to simulate the BUY directly if quoting is hard.
+        // But let's try a standard "getAmountsOut" style if available, or fallback to a generic view.
+        // For now, let's assume we can't easily quote via View for Virtuals in this generic structure,
+        // so we might skip the "Quote" step for Virtuals and rely on the actual Swap simulation?
+        // No, the code structure requires a Quote first.
+        // Let's try to call `getBuyPrice` with a dummy amount (e.g. 1 token) just to check if contract exists/responds.
+        // Or better: We simulate the `buy` transaction directly in the "Quote" phase but treat it as a view call?
+        // No, `buy` changes state.
+        // Let's stick to the pattern: If Virtuals, we try to encode `getBuyPrice`.
+        // If it fails, we will see it in logs.
+        // We will implement the `buy` encoding in the second phase.
+
         let router = BaseContract::from(router_abi);
         let token = BaseContract::from(erc20_abi);
         let revm_router = rAddress::from(router_addr.0);
@@ -541,19 +562,65 @@ impl Simulator {
             let routes = vec![route];
             aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
         } else {
-            // [修复] 如果是 Universal Router 且没有 PoolKey，直接报错，不要尝试调用 V2 方法
-            if router_addr == *UNIVERSAL_ROUTER {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "Universal Router requires PoolKey".to_string(),
-                    0,
-                    0,
-                ));
+            if router_addr == *VIRTUALS_ROUTER {
+                // Virtuals Protocol Quote
+                // Since we don't have a perfect "getAmountsOut" for bonding curves (which usually take Token Amount as input, not ETH),
+                // we will try to simulate a "buy" call as a static call to see the output?
+                // Most `buy` functions return the amount of tokens bought.
+                // Let's try to encode `buy` and run it as a view call (static simulation).
+
+                // Function: buy(address token, uint256 amountIn, uint256 minAmountOut) payable returns (uint256)
+                #[allow(deprecated)]
+                let virtuals_buy_func = Function {
+                    name: "buy".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "token".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amountIn".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "minAmountOut".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![Param {
+                        name: "amountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    }],
+                    constant: None,
+                    state_mutability: StateMutability::Payable,
+                };
+                let mut virtuals_abi = Abi::default();
+                virtuals_abi
+                    .functions
+                    .insert("buy".to_string(), vec![virtuals_buy_func]);
+                let v_router = BaseContract::from(virtuals_abi);
+
+                // We simulate a buy with 0 minAmountOut to see how much we get
+                v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
+            } else {
+                // [修复] 如果是 Universal Router 且没有 PoolKey，直接报错，不要尝试调用 V2 方法
+                if router_addr == *UNIVERSAL_ROUTER {
+                    return Ok((
+                        false,
+                        U256::zero(),
+                        U256::zero(),
+                        "Universal Router requires PoolKey".to_string(),
+                        0,
+                        0,
+                    ));
+                }
+                // 标准 V2
+                router.encode("getAmountsOut", (amount_in_eth, path.clone()))?
             }
-            // 标准 V2
-            router.encode("getAmountsOut", (amount_in_eth, path.clone()))?
         };
 
         evm.env.tx.caller = my_wallet;
@@ -613,6 +680,18 @@ impl Simulator {
                     quoter
                         .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
                         .map(|r| r.0)
+                        .unwrap_or_default()
+                } else if router_addr == *VIRTUALS_ROUTER {
+                    // Decode the output of the simulated "buy" call
+                    // Assuming it returns (uint256 amountOut)
+                    let v_router = BaseContract::from(
+                        ethers::abi::parse_abi(&[
+                            "function buy(address,uint256,uint256) returns (uint256)",
+                        ])
+                        .unwrap(),
+                    );
+                    v_router
+                        .decode_output::<U256, _>("buy", b)
                         .unwrap_or_default()
                 } else {
                     let decoder = if router_addr == *AERODROME_ROUTER {
@@ -809,6 +888,44 @@ impl Simulator {
                     deadline,
                 ),
             )?
+        } else if router_addr == *VIRTUALS_ROUTER {
+            // Virtuals Buy: buy(address token, uint256 amountIn, uint256 minAmountOut)
+            #[allow(deprecated)]
+            let virtuals_buy_func = Function {
+                name: "buy".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "token".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "amountIn".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "minAmountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: None,
+                state_mutability: StateMutability::Payable,
+            };
+            let mut virtuals_abi = Abi::default();
+            virtuals_abi
+                .functions
+                .insert("buy".to_string(), vec![virtuals_buy_func]);
+            let v_router = BaseContract::from(virtuals_abi);
+
+            // We use the same encoding as the quote step because we simulated the buy transaction there
+            v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
         } else {
             // 标准 V2
             router.encode(

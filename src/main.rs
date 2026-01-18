@@ -17,7 +17,7 @@ use crate::persistence::{
 use crate::simulation::Simulator;
 use chrono::Local;
 use dotenv::dotenv;
-use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability, Token};
+use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
 use ethers::prelude::*;
 use ethers::providers::{Ipc, Middleware};
 use std::collections::HashSet;
@@ -65,7 +65,29 @@ fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
     }
 
     // Decode execute(bytes,bytes[])
-    let abi = parse_abi(&["function execute(bytes,bytes[])"]).ok()?;
+    // let abi = parse_abi(&["function execute(bytes,bytes[])"]).ok()?;
+    // Manual ABI construction for stability
+    let mut abi = Abi::default();
+    #[allow(deprecated)]
+    let func = Function {
+        name: "execute".to_string(),
+        inputs: vec![
+            Param {
+                name: "commands".to_string(),
+                kind: ParamType::Bytes,
+                internal_type: None,
+            },
+            Param {
+                name: "inputs".to_string(),
+                kind: ParamType::Array(Box::new(ParamType::Bytes)),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![],
+        constant: None,
+        state_mutability: StateMutability::NonPayable,
+    };
+    abi.functions.insert("execute".to_string(), vec![func]);
     let function = abi.function("execute").ok()?;
     let decoded = function.decode_input(&input[4..]).ok()?;
 
@@ -329,9 +351,36 @@ async fn execute_buy_and_approve(
         let commands = vec![0x10u8]; // V4_SWAP
         let inputs = vec![Token::Bytes(v4_swap_input)];
 
-        let router = BaseContract::from(parse_abi(&[
-            "function execute(bytes,bytes[],uint256) external payable",
-        ])?);
+        // Manual ABI for Universal Router execute
+        let mut router_abi = Abi::default();
+        #[allow(deprecated)]
+        let func = Function {
+            name: "execute".to_string(),
+            inputs: vec![
+                Param {
+                    name: "commands".to_string(),
+                    kind: ParamType::Bytes,
+                    internal_type: None,
+                },
+                Param {
+                    name: "inputs".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Bytes)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "deadline".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        router_abi
+            .functions
+            .insert("execute".to_string(), vec![func]);
+        let router = BaseContract::from(router_abi);
         router.encode("execute", (Bytes::from(commands), inputs, deadline))?
     } else if router_addr == *UNIV3_ROUTER {
         // Uniswap V3
@@ -433,9 +482,40 @@ async fn execute_buy_and_approve(
         )?
     } else {
         // 标准 V2
-        let router_abi = parse_abi(&[
-            "function swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, address[] calldata path, address to, uint deadline) external payable"
-        ])?;
+        let mut router_abi = Abi::default();
+        #[allow(deprecated)]
+        let func = Function {
+            name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            inputs: vec![
+                Param {
+                    name: "amountOutMin".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+                Param {
+                    name: "path".to_string(),
+                    kind: ParamType::Array(Box::new(ParamType::Address)),
+                    internal_type: None,
+                },
+                Param {
+                    name: "to".to_string(),
+                    kind: ParamType::Address,
+                    internal_type: None,
+                },
+                Param {
+                    name: "deadline".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                },
+            ],
+            outputs: vec![],
+            constant: None,
+            state_mutability: StateMutability::Payable,
+        };
+        router_abi.functions.insert(
+            "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+            vec![func],
+        );
         let router = BaseContract::from(router_abi);
         let path = vec![token_in, token_out];
         router.encode(
@@ -457,7 +537,34 @@ async fn execute_buy_and_approve(
         .max_priority_fee_per_gas(priority_fee)
         .nonce(nonce_buy);
 
-    let erc20_abi = parse_abi(&["function approve(address,uint) external returns (bool)"])?;
+    // Manual ERC20 Approve ABI
+    let mut erc20_abi = Abi::default();
+    #[allow(deprecated)]
+    let approve_func = Function {
+        name: "approve".to_string(),
+        inputs: vec![
+            Param {
+                name: "spender".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            },
+            Param {
+                name: "amount".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![Param {
+            name: "success".to_string(),
+            kind: ParamType::Bool,
+            internal_type: None,
+        }],
+        constant: None,
+        state_mutability: StateMutability::NonPayable,
+    };
+    erc20_abi
+        .functions
+        .insert("approve".to_string(), vec![approve_func]);
     let token_contract = BaseContract::from(erc20_abi);
     let approve_calldata = token_contract.encode("approve", (router_addr, U256::MAX))?;
 
@@ -570,9 +677,36 @@ async fn execute_smart_sell(
 
                 let commands = vec![0x10u8];
                 let inputs = vec![Token::Bytes(v4_swap_input)];
-                let router = BaseContract::from(parse_abi(&[
-                    "function execute(bytes,bytes[],uint256) external payable",
-                ])?);
+
+                let mut router_abi = Abi::default();
+                #[allow(deprecated)]
+                let func = Function {
+                    name: "execute".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "commands".to_string(),
+                            kind: ParamType::Bytes,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "inputs".to_string(),
+                            kind: ParamType::Array(Box::new(ParamType::Bytes)),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "deadline".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![],
+                    constant: None,
+                    state_mutability: StateMutability::Payable,
+                };
+                router_abi
+                    .functions
+                    .insert("execute".to_string(), vec![func]);
+                let router = BaseContract::from(router_abi);
                 router.encode("execute", (Bytes::from(commands), inputs, deadline))?
             } else if router_addr == *UNIV3_ROUTER {
                 let v3_swap_params_type = ParamType::Tuple(vec![
@@ -678,9 +812,45 @@ async fn execute_smart_sell(
                 )?
             } else {
                 // 标准 V2
-                let router_abi = parse_abi(&[
-                    "function swapExactTokensForETHSupportingFeeOnTransferTokens(uint amountIn, uint amountOutMin, address[] calldata path, address to, uint deadline) external"
-                ])?;
+                let mut router_abi = Abi::default();
+                #[allow(deprecated)]
+                let func = Function {
+                    name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                    inputs: vec![
+                        Param {
+                            name: "amountIn".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "amountOutMin".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "path".to_string(),
+                            kind: ParamType::Array(Box::new(ParamType::Address)),
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "to".to_string(),
+                            kind: ParamType::Address,
+                            internal_type: None,
+                        },
+                        Param {
+                            name: "deadline".to_string(),
+                            kind: ParamType::Uint(256),
+                            internal_type: None,
+                        },
+                    ],
+                    outputs: vec![],
+                    constant: None,
+                    state_mutability: StateMutability::NonPayable,
+                };
+                router_abi.functions.insert(
+                    "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+                    vec![func],
+                );
                 let router = BaseContract::from(router_abi);
                 let path = vec![token_in, token_out];
                 router.encode(
@@ -741,21 +911,147 @@ async fn monitor_position(
 ) {
     println!("*** [MONITOR] Watching: {:?}", token_addr);
     // 修复：使用 expect/match 替代 unwrap，防止 panic
-    let erc20_abi = parse_abi(&["function balanceOf(address) external view returns (uint)"])
-        .expect("ABI Parse Error");
+    let mut erc20_abi = Abi::default();
+    #[allow(deprecated)]
+    let balance_func = Function {
+        name: "balanceOf".to_string(),
+        inputs: vec![Param {
+            name: "account".to_string(),
+            kind: ParamType::Address,
+            internal_type: None,
+        }],
+        outputs: vec![Param {
+            name: "balance".to_string(),
+            kind: ParamType::Uint(256),
+            internal_type: None,
+        }],
+        constant: Some(true),
+        state_mutability: StateMutability::View,
+    };
+    erc20_abi
+        .functions
+        .insert("balanceOf".to_string(), vec![balance_func]);
     let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
 
     // V2 Router
-    let router_abi =
-        parse_abi(&["function getAmountsOut(uint,address[]) external view returns (uint[])"])
-            .expect("ABI Parse Error");
+    let mut router_abi = Abi::default();
+    #[allow(deprecated)]
+    let get_amounts_out_func = Function {
+        name: "getAmountsOut".to_string(),
+        inputs: vec![
+            Param {
+                name: "amountIn".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "path".to_string(),
+                kind: ParamType::Array(Box::new(ParamType::Address)),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![Param {
+            name: "amounts".to_string(),
+            kind: ParamType::Array(Box::new(ParamType::Uint(256))),
+            internal_type: None,
+        }],
+        constant: Some(true),
+        state_mutability: StateMutability::View,
+    };
+    router_abi
+        .functions
+        .insert("getAmountsOut".to_string(), vec![get_amounts_out_func]);
     let router_contract = Contract::new(router_addr, router_abi, client.clone());
 
     // V4 Quoter
-    let v4_quoter = Contract::new(*UNIV4_QUOTER, parse_abi(&["function quoteExactInputSingle(((address,address,uint24,int24,address), bool, uint128, bytes)) external returns (uint256, uint128)"]).unwrap(), client.clone());
+    let mut v4_quoter_abi = Abi::default();
+    let v4_pool_key_type = ParamType::Tuple(vec![
+        ParamType::Address,
+        ParamType::Address,
+        ParamType::Uint(24),
+        ParamType::Int(24),
+        ParamType::Address,
+    ]);
+    let v4_params_type = ParamType::Tuple(vec![
+        v4_pool_key_type,
+        ParamType::Bool,
+        ParamType::Uint(128),
+        ParamType::Bytes,
+    ]);
+    #[allow(deprecated)]
+    let v4_quote_func = Function {
+        name: "quoteExactInputSingle".to_string(),
+        inputs: vec![Param {
+            name: "params".to_string(),
+            kind: v4_params_type,
+            internal_type: None,
+        }],
+        outputs: vec![
+            Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "gasEstimate".to_string(),
+                kind: ParamType::Uint(128),
+                internal_type: None,
+            },
+        ],
+        constant: None,
+        state_mutability: StateMutability::NonPayable,
+    };
+    v4_quoter_abi
+        .functions
+        .insert("quoteExactInputSingle".to_string(), vec![v4_quote_func]);
+    let v4_quoter = Contract::new(*UNIV4_QUOTER, v4_quoter_abi, client.clone());
 
     // V3 Quoter
-    let quoter_contract = Contract::new(*UNIV3_QUOTER, parse_abi(&["function quoteExactInputSingle((address,address,uint256,uint24,uint160)) external returns (uint256, uint160, uint32, uint256)"]).unwrap(), client.clone());
+    let mut v3_quoter_abi = Abi::default();
+    let v3_params_type = ParamType::Tuple(vec![
+        ParamType::Address,
+        ParamType::Address,
+        ParamType::Uint(256),
+        ParamType::Uint(24),
+        ParamType::Uint(160),
+    ]);
+    #[allow(deprecated)]
+    let v3_quote_func = Function {
+        name: "quoteExactInputSingle".to_string(),
+        inputs: vec![Param {
+            name: "params".to_string(),
+            kind: v3_params_type,
+            internal_type: None,
+        }],
+        outputs: vec![
+            Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "sqrtPriceX96After".to_string(),
+                kind: ParamType::Uint(160),
+                internal_type: None,
+            },
+            Param {
+                name: "initializedTicksCrossed".to_string(),
+                kind: ParamType::Uint(32),
+                internal_type: None,
+            },
+            Param {
+                name: "gasEstimate".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        constant: None,
+        state_mutability: StateMutability::NonPayable,
+    };
+    v3_quoter_abi
+        .functions
+        .insert("quoteExactInputSingle".to_string(), vec![v3_quote_func]);
+    let quoter_contract = Contract::new(*UNIV3_QUOTER, v3_quoter_abi, client.clone());
     let path = vec![token_addr, *WETH_BASE];
 
     let mut sold_half = false;
@@ -1029,7 +1325,9 @@ async fn process_transaction(
                 ));
             }
 
-            if router_name == "Unknown" && action != "AddLiquidity" {
+            // [修复] 允许 Auto_Buy 通过，即使 Router 未知 (说明是通过 scan_tx_for_token_in 识别的)
+            if router_name == "Unknown" && action != "AddLiquidity" && !action.contains("Auto_Buy")
+            {
                 return;
             }
 

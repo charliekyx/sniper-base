@@ -1420,6 +1420,13 @@ async fn process_transaction(
                 "Guess Clanker V4 (Static 1% / Tick 200)".to_string(),
             ));
 
+            // [新增] 策略: Clanker V4 低费率 (Static 0.3% / Tick 60)
+            strategies.push((
+                *UNIVERSAL_ROUTER,
+                Some((token0, token1, 3000, 60, *CLANKER_HOOK_STATIC)),
+                "Guess Clanker V4 (Static 0.3% / Tick 60)".to_string(),
+            ));
+
             // 2. Dynamic Hook: Fee Flag 0x800000 (8388608), Tick 200
             // 注意：对于动态费率池，PoolKey 中的 fee 必须是 0x800000
             strategies.push((

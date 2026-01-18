@@ -568,7 +568,7 @@ impl Simulator {
                 false,
                 U256::zero(),
                 U256::zero(),
-                "No_Calldata_Generated".to_string(),
+                "Pool Not Found (V3)".to_string(), // [优化] 明确提示 V3 没池子
                 0,
                 0,
             ));
@@ -635,6 +635,17 @@ impl Simulator {
             // [新增] 捕获 Revert 原因
             ExecutionResult::Revert { output, .. } => {
                 let reason = decode_revert_reason(&output);
+                // [优化] V2 路由 Revert(NoData) 通常意味着池子不存在
+                if reason == "Revert(NoData)" {
+                    return Ok((
+                        false,
+                        U256::zero(),
+                        U256::zero(),
+                        "Pool Not Found (V2)".to_string(),
+                        0,
+                        0,
+                    ));
+                }
                 println!("      [Sim] Quote Reverted: {}", reason);
                 return Ok((false, U256::zero(), U256::zero(), reason, 0, 0));
             }

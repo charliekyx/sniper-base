@@ -21,6 +21,9 @@ lazy_static! {
     pub static ref CLANKER_HOOK_STATIC: Address = Address::from_str("0xb429d62f8f3bFFb98CdB9569533eA23bF0Ba28CC").unwrap();
     // Dynamic Fee Hook (Fee flag 0x800000)
     pub static ref CLANKER_HOOK_DYNAMIC: Address = Address::from_str("0xd60D6B218116cFd801E28F78d011a203D2b068Cc").unwrap();
+    // [New] Clanker V4.0 Hooks (Legacy/Fallback)
+    pub static ref CLANKER_HOOK_STATIC_V4_0: Address = Address::from_str("0xDd5EeaFf7BD481AD55Db083062b13a3cdf0A68CC").unwrap();
+    pub static ref CLANKER_HOOK_DYNAMIC_V4_0: Address = Address::from_str("0x34a45c6B61876d739400Bd71228CbcbD4F53E8cC").unwrap();
 
     pub static ref AERODROME_FACTORY: Address = Address::from_str("0x420DD381b31aEf6683db6B902084cB0FFECe40Da").unwrap();
     pub static ref SUSHI_ROUTER: Address = Address::from_str("0x6BDED42c6DA8FBf0d2bA55B2fa120C5e0c8D7891").unwrap();

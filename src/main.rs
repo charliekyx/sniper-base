@@ -7,8 +7,9 @@ mod simulation;
 use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
-    CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_STATIC, ROCKETSWAP_ROUTER, SUSHI_ROUTER, SWAPBASED_ROUTER,
-    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
+    CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_DYNAMIC_V4_0, CLANKER_HOOK_STATIC, CLANKER_HOOK_STATIC_V4_0,
+    ROCKETSWAP_ROUTER, SUSHI_ROUTER, SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER,
+    UNIVERSAL_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -21,6 +22,7 @@ use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
 use ethers::prelude::*;
 use ethers::providers::{Ipc, Middleware};
 use std::collections::HashSet;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1430,6 +1432,18 @@ async fn process_transaction(
                 "Guess Clanker V4 (Dynamic / Tick 200)".to_string(),
             ));
 
+            // [Strategy] Clanker V4.0 Strategies (Legacy/Fallback)
+            strategies.push((
+                *UNIVERSAL_ROUTER,
+                Some((token0, token1, 10000, 200, *CLANKER_HOOK_STATIC_V4_0)),
+                "Guess Clanker V4.0 (Static 1% / Tick 200)".to_string(),
+            ));
+            strategies.push((
+                *UNIVERSAL_ROUTER,
+                Some((token0, token1, 8388608, 200, *CLANKER_HOOK_DYNAMIC_V4_0)),
+                "Guess Clanker V4.0 (Dynamic / Tick 200)".to_string(),
+            ));
+
             strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
             strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
             strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
@@ -1575,6 +1589,65 @@ async fn process_transaction(
     }
 }
 
+// [新增] 启动自检函数
+async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
+    println!(">>> [SELF-CHECK] Running startup diagnostics...");
+
+    // 1. 检查关键合约是否存在 (验证地址配置是否正确)
+    let checks = vec![
+        ("Universal Router", *UNIVERSAL_ROUTER),
+        ("UniV4 Quoter", *UNIV4_QUOTER),
+        ("Clanker Static Hook (V4.1)", *CLANKER_HOOK_STATIC),
+        ("Clanker Dynamic Hook (V4.1)", *CLANKER_HOOK_DYNAMIC),
+        ("Aerodrome Router", *AERODROME_ROUTER),
+    ];
+
+    for (name, addr) in checks {
+        match provider.get_code(addr, None).await {
+            Ok(code) => {
+                if code.len() > 0 {
+                    println!("   [OK] Contract '{}' found at {:?}", name, addr);
+                } else {
+                    println!(
+                        "   [WARN] Contract '{}' NOT FOUND at {:?} (Check constants.rs)",
+                        name, addr
+                    );
+                }
+            }
+            Err(e) => println!("   [ERR] Failed to check '{}': {:?}", name, e),
+        }
+    }
+
+    // 2. 模拟测试 (WETH -> USDC on Aerodrome) 验证模拟引擎是否正常
+    // USDC on Base: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
+    if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
+        let amount_in = U256::from(1000000000000000u64); // 0.001 ETH
+
+        println!("   [TEST] Simulating WETH -> USDC (Aerodrome) to verify engine...");
+        let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
+
+        let sim_res = simulator
+            .simulate_bundle(origin, None, *AERODROME_ROUTER, amount_in, usdc, None)
+            .await;
+
+        match sim_res {
+            Ok((success, _, out, reason, _, _)) => {
+                if success {
+                    println!(
+                        "   [PASS] Simulation Engine is working. Output: {} USDC",
+                        out
+                    );
+                } else {
+                    println!("   [FAIL] Simulation returned false. Reason: {}", reason);
+                }
+            }
+            Err(e) => println!("   [FAIL] Simulation crashed: {:?}", e),
+        }
+    }
+
+    println!(">>> [SELF-CHECK] Diagnostics complete.\n");
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenv().ok();
@@ -1618,6 +1691,10 @@ async fn main() -> anyhow::Result<()> {
     let client = Arc::new(SignerMiddleware::new(provider.clone(), wallet.clone()));
     let provider_arc = Arc::new(provider);
     let simulator = Simulator::new(provider_arc.clone());
+
+    // [新增] 在主循环开始前运行自检
+    run_self_check(provider_arc.clone(), simulator.clone()).await;
+
     let targets = config.get_targets();
 
     // 恢复之前的持仓

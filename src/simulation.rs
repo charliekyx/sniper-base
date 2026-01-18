@@ -645,7 +645,11 @@ impl Simulator {
         if v4_pool_key.is_some() {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
         } else if is_v3 {
-            evm.env.tx.transact_to = TransactTo::Call(revm_router);
+            if router_addr == *PANCAKESWAP_V3_ROUTER {
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
+            } else {
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+            }
         } else if router_addr == *VIRTUALS_ROUTER {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
         } else if router_addr == *VIRTUALS_FACTORY_ROUTER {

@@ -415,19 +415,20 @@ async fn execute_buy_and_approve(
         let mut v3_swap_abi = Abi::default();
         v3_swap_abi
             .functions
-            .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
-        let router = BaseContract::from(v3_swap_abi);
-        // params: (tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96)
-        let params = (
-            *WETH_BASE,
-            token_out,
-            fee,
-            client.address(),
-            amount_in,
-            amount_out_min,
-            U256::zero(),
-        );
-        router.encode("exactInputSingle", (params,))?
+            .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
+
+        // [Fix] Manual Token Construction for V3 Buy
+        let params_token = Token::Tuple(vec![
+            Token::Address(*WETH_BASE),
+            Token::Address(token_out),
+            Token::Uint(U256::from(fee)),
+            Token::Address(client.address()),
+            Token::Uint(amount_in),
+            Token::Uint(amount_out_min),
+            Token::Uint(U256::zero()), // sqrtPriceLimitX96
+        ]);
+        let encoded = v3_swap_func.encode_input(&[params_token])?;
+        Bytes::from(encoded)
     } else if router_addr == *AERODROME_ROUTER {
         let route_struct_type = ParamType::Tuple(vec![
             ParamType::Address, // from
@@ -776,19 +777,20 @@ async fn execute_smart_sell(
                 let mut v3_swap_abi = Abi::default();
                 v3_swap_abi
                     .functions
-                    .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
-                let router = BaseContract::from(v3_swap_abi);
-                // Sell: Token -> WETH
-                let params = (
-                    token_in,
-                    token_out,
-                    fee,
-                    client.address(),
-                    amt,
-                    U256::zero(),
-                    U256::zero(),
-                );
-                router.encode("exactInputSingle", (params,))?
+                    .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
+
+                // [Fix] Manual Token Construction for V3 Sell
+                let params_token = Token::Tuple(vec![
+                    Token::Address(token_in),
+                    Token::Address(token_out),
+                    Token::Uint(U256::from(fee)),
+                    Token::Address(client.address()),
+                    Token::Uint(amt),
+                    Token::Uint(U256::zero()), // amountOutMinimum
+                    Token::Uint(U256::zero()), // sqrtPriceLimitX96
+                ]);
+                let encoded = v3_swap_func.encode_input(&[params_token])?;
+                Bytes::from(encoded)
             } else if router_addr == *AERODROME_ROUTER {
                 let route_struct_type = ParamType::Tuple(vec![
                     ParamType::Address, // from

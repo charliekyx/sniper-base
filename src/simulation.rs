@@ -757,7 +757,8 @@ impl Simulator {
         );
 
         // [新增] 如果 Quote 结果为 0，直接终止，不要尝试买入（节省资源并减少误报）
-        if expected_tokens.is_zero() {
+        // [Fix] For Virtuals, the buy function might not return the amount (void), so we proceed even if 0 to check balance change
+        if expected_tokens.is_zero() && router_addr != *VIRTUALS_ROUTER {
             return Ok((
                 false,
                 U256::zero(),
@@ -1061,19 +1062,21 @@ impl Simulator {
             let mut v3_swap_abi = Abi::default();
             v3_swap_abi
                 .functions
-                .insert("exactInputSingle".to_string(), vec![v3_swap_func]);
-            let v3_router = BaseContract::from(v3_swap_abi);
-            // Sell: Token -> WETH
-            let params = (
-                token_out,
-                *WETH_BASE,
-                best_fee,
-                Address::from(my_wallet.0 .0),
-                token_balance,
-                U256::zero(),
-                U256::zero(),
-            );
-            v3_router.encode("exactInputSingle", (params,))?
+                .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
+
+            // [Fix] Use Manual Token Construction for Sell to avoid encoding issues
+            let params_token = Token::Tuple(vec![
+                Token::Address(token_out),
+                Token::Address(*WETH_BASE),
+                Token::Uint(U256::from(best_fee)),
+                Token::Address(Address::from(my_wallet.0 .0)),
+                Token::Uint(token_balance),
+                Token::Uint(U256::zero()), // amountOutMinimum
+                Token::Uint(U256::zero()), // sqrtPriceLimitX96
+            ]);
+
+            let encoded = v3_swap_func.encode_input(&[params_token])?;
+            Bytes::from(encoded)
         } else if router_addr == *AERODROME_ROUTER {
             #[allow(deprecated)]
             let aero_sell_func = Function {

@@ -3,6 +3,7 @@ use lazy_static::lazy_static;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+// todo: Virtuals Protocol：Base 链上目前非常火的 Virtuals 协议，它们不使用 Uniswap/Aerodrome，而是有自己的内部池子。你的机器人目前不支持 Virtuals
 lazy_static! {
     pub static ref WETH_BASE: Address = Address::from_str("0x4200000000000000000000000000000000000006").unwrap();
 
@@ -12,6 +13,9 @@ lazy_static! {
     pub static ref UNIV3_ROUTER: Address = Address::from_str("0x2626664c2603336E57B271c5C0b26F421741e481").unwrap();
     pub static ref UNIV3_QUOTER: Address = Address::from_str("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a").unwrap();
     pub static ref AERODROME_ROUTER: Address = Address::from_str("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43").unwrap();
+    // PancakeSwap V3 (Base)
+    pub static ref PANCAKESWAP_V3_ROUTER: Address = Address::from_str("0x1b81D678ffb9C0263b24A97847620C99d213eB14").unwrap();
+    pub static ref PANCAKESWAP_V3_QUOTER: Address = Address::from_str("0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997").unwrap();
 
     // Uniswap V4 (Base)
     pub static ref UNIV4_POOL_MANAGER: Address = Address::from_str("0x498581fF718922c3f8e6A244956aF099B2652b2b").unwrap();
@@ -37,6 +41,8 @@ lazy_static! {
     pub static ref SWAPBASED_ROUTER: Address = Address::from_str("0xaaa3b1F1bd7BCc97fD1917c18ade665C5D31F066").unwrap();
     // RocketSwap Router (Base)
     pub static ref ROCKETSWAP_ROUTER: Address = Address::from_str("0x4cf76043B3f97ba06917cBd90F9e3A2AFcd1aCd0").unwrap();
+    // Virtuals Protocol (Base) - Agent Factory / Router
+    pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0x15e7903697e4d6D4498002967974657C6377077B").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {
@@ -52,6 +58,8 @@ lazy_static! {
         m.insert(*DEBRIDGE_ROUTER, "deBridge".to_string());
         m.insert(*SWAPBASED_ROUTER, "SwapBased".to_string());
         m.insert(*ROCKETSWAP_ROUTER, "RocketSwap".to_string());
+        m.insert(*PANCAKESWAP_V3_ROUTER, "PancakeSwapV3".to_string());
+        m.insert(*VIRTUALS_ROUTER, "VirtualsProtocol".to_string());
         m
     };
 }

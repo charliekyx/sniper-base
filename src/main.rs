@@ -8,8 +8,8 @@ use crate::config::AppConfig;
 use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
     CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_DYNAMIC_V4_0, CLANKER_HOOK_STATIC, CLANKER_HOOK_STATIC_V4_0,
-    ROCKETSWAP_ROUTER, SUSHI_ROUTER, SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER,
-    UNIVERSAL_ROUTER, WETH_BASE,
+    PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER, ROCKETSWAP_ROUTER, SUSHI_ROUTER,
+    SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::persistence::{
@@ -384,7 +384,7 @@ async fn execute_buy_and_approve(
             .insert("execute".to_string(), vec![func]);
         let router = BaseContract::from(router_abi);
         router.encode("execute", (Bytes::from(commands), inputs, deadline))?
-    } else if router_addr == *UNIV3_ROUTER {
+    } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
         // Uniswap V3
         let v3_swap_params_type = ParamType::Tuple(vec![
             ParamType::Address,   // tokenIn
@@ -708,7 +708,7 @@ async fn execute_smart_sell(
                     .insert("execute".to_string(), vec![func]);
                 let router = BaseContract::from(router_abi);
                 router.encode("execute", (Bytes::from(commands), inputs, deadline))?
-            } else if router_addr == *UNIV3_ROUTER {
+            } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
                 let v3_swap_params_type = ParamType::Tuple(vec![
                     ParamType::Address,   // tokenIn
                     ParamType::Address,   // tokenOut
@@ -1049,7 +1049,13 @@ async fn monitor_position(
     v3_quoter_abi
         .functions
         .insert("quoteExactInputSingle".to_string(), vec![v3_quote_func]);
-    let quoter_contract = Contract::new(*UNIV3_QUOTER, v3_quoter_abi, client.clone());
+
+    let target_quoter = if router_addr == *PANCAKESWAP_V3_ROUTER {
+        *PANCAKESWAP_V3_QUOTER
+    } else {
+        *UNIV3_QUOTER
+    };
+    let quoter_contract = Contract::new(target_quoter, v3_quoter_abi, client.clone());
     let path = vec![token_addr, *WETH_BASE];
 
     let mut sold_half = false;
@@ -1101,11 +1107,17 @@ async fn monitor_position(
             match v4_quoter.method::<_, (U256, u128)>("quoteExactInputSingle", (params,)) {
                 Ok(m) => match m.call().await {
                     Ok((amount_out, _)) => amount_out,
-                    Err(_) => U256::zero(),
+                    Err(_) => {
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
                 },
-                Err(_) => U256::zero(),
+                Err(_) => {
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
             }
-        } else if router_addr == *UNIV3_ROUTER {
+        } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
             // V3 Price Check
             let params = (token_addr, *WETH_BASE, balance, fee, U256::zero());
             match quoter_contract
@@ -1115,9 +1127,15 @@ async fn monitor_position(
                 ) {
                 Ok(m) => match m.call().await {
                     Ok((amount_out, _, _, _)) => amount_out,
-                    Err(_) => U256::zero(),
+                    Err(_) => {
+                        sleep(Duration::from_millis(500)).await;
+                        continue;
+                    }
                 },
-                Err(_) => U256::zero(),
+                Err(_) => {
+                    sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
             }
         } else {
             match router_contract.method::<_, Vec<U256>>("getAmountsOut", (balance, path.clone())) {
@@ -1448,6 +1466,7 @@ async fn process_transaction(
             ));
 
             strategies.push((*UNIV3_ROUTER, None, "Uniswap V3".to_string()));
+            strategies.push((*PANCAKESWAP_V3_ROUTER, None, "PancakeSwap V3".to_string()));
             strategies.push((*AERODROME_ROUTER, None, "Aerodrome V2".to_string()));
             strategies.push((*BASESWAP_ROUTER, None, "BaseSwap V2".to_string()));
             strategies.push((*ALIENBASE_ROUTER, None, "AlienBase V2".to_string()));

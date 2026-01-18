@@ -1,6 +1,6 @@
 use crate::constants::{
-    AERODROME_FACTORY, AERODROME_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER,
-    UNIVERSAL_ROUTER, WETH_BASE,
+    AERODROME_FACTORY, AERODROME_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
+    UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
 use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
@@ -447,7 +447,7 @@ impl Simulator {
 
         // [新增] V3 费率探测逻辑
         let mut best_fee = 0u32;
-        let is_v3 = router_addr == *UNIV3_ROUTER;
+        let is_v3 = router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER;
 
         // [修改] 针对 Aerodrome 做特殊编码
         let amounts_out_calldata = if let Some(pool_key) = v4_pool_key {
@@ -475,8 +475,9 @@ impl Simulator {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
             Bytes::from(encoded)
         } else if is_v3 {
-            // V3 需要探测费率 (10000, 3000, 500, 100)
-            let fees = vec![10000, 3000, 500, 100];
+            // V3 需要探测费率 (10000, 3000, 2500, 500, 100)
+            // 加入 2500 (0.25%) 主要是为了 PancakeSwap
+            let fees = vec![10000, 3000, 2500, 500, 100];
             let quoter = BaseContract::from(v3_quoter_abi.clone());
             let mut found_calldata = None;
 
@@ -496,7 +497,12 @@ impl Simulator {
                 let calldata = quoter.encode("quoteExactInputSingle", (params,))?;
 
                 // 临时执行一次 view call
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+                if router_addr == *PANCAKESWAP_V3_ROUTER {
+                    evm.env.tx.transact_to =
+                        TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
+                } else {
+                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+                }
                 evm.env.tx.data = calldata.0.clone().into();
                 evm.env.tx.caller = my_wallet;
 
@@ -554,7 +560,11 @@ impl Simulator {
         if v4_pool_key.is_some() {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
         } else if is_v3 {
-            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+            if router_addr == *PANCAKESWAP_V3_ROUTER {
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
+            } else {
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
+            }
         } else {
             evm.env.tx.transact_to = TransactTo::Call(revm_router);
         }

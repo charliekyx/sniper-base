@@ -3,7 +3,7 @@ use crate::constants::{
     UNIVERSAL_ROUTER, WETH_BASE,
 };
 use anyhow::Result;
-use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability};
+use ethers::abi::{parse_abi, Abi, Function, Param, ParamType, StateMutability, Token};
 // [修改] 引入 Ipc，去掉 Ws
 use ethers::prelude::{BaseContract, Ipc, Middleware, Provider};
 use ethers::types::{Address, Bytes, Transaction, U256};
@@ -248,25 +248,29 @@ impl Simulator {
 
         // [修改] 针对 Aerodrome 做特殊编码
         let amounts_out_calldata = if let Some(pool_key) = v4_pool_key {
-            // V4 Logic
-            let quoter = BaseContract::from(v4_quoter_abi.clone());
-            // PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
-            // Params: (poolKey, zeroForOne, amountIn, hookData)
-            // zeroForOne: true if tokenIn < tokenOut (sort order)
-            // WETH is usually token0 or token1 depending on address sort
+            // [FIXED] Manual Token Construction for V4 to avoid "Invalid Data"
+            let func = v4_quoter_abi.function("quoteExactInputSingle")?;
             let zero_for_one = *WETH_BASE < token_out;
 
-            // QuoteExactInputSingleParams
-            let params = (
-                pool_key,
-                zero_for_one,
-                amount_in_eth.as_u128(),
-                Bytes::default(), // hookData
-            );
+            // PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
+            let pk_token = Token::Tuple(vec![
+                Token::Address(pool_key.0),
+                Token::Address(pool_key.1),
+                Token::Uint(U256::from(pool_key.2)),
+                Token::Int(U256::from(pool_key.3)), // i32 -> U256 (for positive ticks like 60/200 this is fine)
+                Token::Address(pool_key.4),
+            ]);
+            // Params: (poolKey, zeroForOne, amountIn, hookData)
+            let params_token = Token::Tuple(vec![
+                pk_token,
+                Token::Bool(zero_for_one),
+                Token::Uint(amount_in_eth),
+                Token::Bytes(vec![]),
+            ]);
 
-            // V4 Quoter call
+            let encoded = func.encode_input(&[params_token])?;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
-            quoter.encode("quoteExactInputSingle", (params,))?
+            Bytes::from(encoded)
         } else if is_v3 {
             // V3 需要探测费率 (10000, 3000, 500, 100)
             let fees = vec![10000, 3000, 500, 100];

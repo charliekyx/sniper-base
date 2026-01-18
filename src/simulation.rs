@@ -1114,7 +1114,32 @@ impl Simulator {
         let approve_calldata = token.encode("approve", (router_addr, U256::MAX))?;
         evm.env.tx.transact_to = TransactTo::Call(revm_token);
         evm.env.tx.data = approve_calldata.0.into();
-        evm.transact_commit().ok();
+
+        // [Fix] Check approve result explicitly
+        match evm.transact_commit() {
+            Ok(ExecutionResult::Success { .. }) => {}
+            Ok(ExecutionResult::Revert { output, .. }) => {
+                let reason = decode_revert_reason(&output);
+                return Ok((
+                    false,
+                    U256::zero(),
+                    expected_tokens,
+                    format!("Approve Reverted: {}", reason),
+                    0,
+                    0,
+                ));
+            }
+            _ => {
+                return Ok((
+                    false,
+                    U256::zero(),
+                    expected_tokens,
+                    "Approve Failed (System)".to_string(),
+                    0,
+                    0,
+                ))
+            }
+        }
 
         let sell_path = vec![token_out, *WETH_BASE];
 
@@ -1234,19 +1259,31 @@ impl Simulator {
         evm.env.tx.data = sell_calldata.0.into();
 
         let sell_result = evm.transact_commit();
-        if sell_result.is_err() {
-            return Ok((
-                false,
-                U256::zero(),
-                expected_tokens,
-                "HONEYPOT: Sell Reverted".to_string(),
-                0,
-                0,
-            ));
-        }
-        let gas_used = match sell_result.unwrap() {
-            ExecutionResult::Success { gas_used, .. } => gas_used,
-            _ => 0,
+
+        // [Fix] Check sell result explicitly and capture gas/revert reason
+        let gas_used = match sell_result {
+            Ok(ExecutionResult::Success { gas_used, .. }) => gas_used,
+            Ok(ExecutionResult::Revert { output, .. }) => {
+                let reason = decode_revert_reason(&output);
+                return Ok((
+                    false,
+                    U256::zero(),
+                    expected_tokens,
+                    format!("Sell Reverted: {}", reason),
+                    0,
+                    0,
+                ));
+            }
+            _ => {
+                return Ok((
+                    false,
+                    U256::zero(),
+                    expected_tokens,
+                    "Sell Failed (System)".to_string(),
+                    0,
+                    0,
+                ));
+            }
         };
 
         let final_eth = cache_db

@@ -645,11 +645,7 @@ impl Simulator {
         if v4_pool_key.is_some() {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
         } else if is_v3 {
-            if router_addr == *PANCAKESWAP_V3_ROUTER {
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
-            } else {
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
-            }
+            evm.env.tx.transact_to = TransactTo::Call(revm_router);
         } else if router_addr == *VIRTUALS_ROUTER {
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
         } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
@@ -1253,6 +1249,43 @@ impl Simulator {
                     deadline,
                 ),
             )?
+        } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
+            // [Fix] Virtuals Protocol Sell (Direct)
+            // sell(address token, uint256 amountIn, uint256 minAmountOut)
+            #[allow(deprecated)]
+            let virtuals_sell_func = Function {
+                name: "sell".to_string(),
+                inputs: vec![
+                    Param {
+                        name: "token".to_string(),
+                        kind: ParamType::Address,
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "amountIn".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                    Param {
+                        name: "minAmountOut".to_string(),
+                        kind: ParamType::Uint(256),
+                        internal_type: None,
+                    },
+                ],
+                outputs: vec![Param {
+                    name: "amountOut".to_string(),
+                    kind: ParamType::Uint(256),
+                    internal_type: None,
+                }],
+                constant: None,
+                state_mutability: StateMutability::NonPayable,
+            };
+            let mut virtuals_abi = Abi::default();
+            virtuals_abi
+                .functions
+                .insert("sell".to_string(), vec![virtuals_sell_func]);
+            let v_router = BaseContract::from(virtuals_abi);
+            v_router.encode("sell", (token_out, token_balance, U256::zero()))?
         } else {
             router.encode(
                 "swapExactTokensForETHSupportingFeeOnTransferTokens",
@@ -1298,11 +1331,37 @@ impl Simulator {
             }
         };
 
-        let final_eth = cache_db
+        let mut final_eth = evm
+            .db
+            .as_mut()
+            .unwrap()
             .basic(my_wallet)
             .map_err(|_| anyhow::anyhow!("Failed"))?
             .unwrap()
             .balance;
+
+        // [Fix] V3 Swaps return WETH. Virtuals might also behave unexpectedly.
+        // We check WETH balance for these strategies to ensure we capture all profit.
+        if is_v3 || router_addr == *VIRTUALS_FACTORY_ROUTER {
+            let weth_balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
+            let revm_weth = rAddress::from(WETH_BASE.0);
+            evm.env.tx.transact_to = TransactTo::Call(revm_weth);
+            evm.env.tx.data = weth_balance_calldata.0.into();
+
+            if let Ok(ResultAndState {
+                result:
+                    ExecutionResult::Success {
+                        output: Output::Call(b),
+                        ..
+                    },
+                ..
+            }) = evm.transact()
+            {
+                if let Ok(weth_bal) = token.decode_output::<U256, _>("balanceOf", b) {
+                    final_eth += rU256::from_limbs(weth_bal.0);
+                }
+            }
+        }
 
         if final_eth >= initial_eth {
             Ok((

@@ -9,7 +9,7 @@ use crate::constants::{
     get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
     CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_DYNAMIC_V4_0, CLANKER_HOOK_STATIC, CLANKER_HOOK_STATIC_V4_0,
     PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER, ROCKETSWAP_ROUTER, SUSHI_ROUTER,
-    SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
+    SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, USDC_BASE,
     VIRTUALS_FACTORY_ROUTER, VIRTUALS_ROUTER, WETH_BASE,
 };
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
@@ -1795,6 +1795,14 @@ async fn process_transaction(
                 None,
                 Some(vec![*WETH_BASE, *VIRTUALS_ROUTER, token_addr]),
                 "Aerodrome V2 (Virtuals Hop)".to_string(),
+            ));
+
+            // [Strategy] Aerodrome Hop (USDC)
+            strategies.push((
+                *AERODROME_ROUTER,
+                None,
+                Some(vec![*WETH_BASE, *USDC_BASE, token_addr]),
+                "Aerodrome V2 (USDC Hop)".to_string(),
             ));
 
             strategies.push((

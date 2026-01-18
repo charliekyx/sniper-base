@@ -6,6 +6,7 @@ use std::str::FromStr;
 // todo: Virtuals Protocol：Base 链上目前非常火的 Virtuals 协议，它们不使用 Uniswap/Aerodrome，而是有自己的内部池子。你的机器人目前不支持 Virtuals
 lazy_static! {
     pub static ref WETH_BASE: Address = Address::from_str("0x4200000000000000000000000000000000000006").unwrap();
+    pub static ref USDC_BASE: Address = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913").unwrap();
 
     // Router Addresses
     pub static ref BASESWAP_ROUTER: Address = Address::from_str("0x2948acbbc8795267e62a1220683a48e718b52585").unwrap();

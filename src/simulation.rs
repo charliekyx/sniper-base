@@ -729,12 +729,20 @@ impl Simulator {
                     } else {
                         router.clone()
                     };
-                    decoder
-                        .decode_output::<Vec<U256>, _>("getAmountsOut", b)
-                        .unwrap_or_default()
-                        .last()
-                        .cloned()
-                        .unwrap_or_default()
+                    match decoder.decode_output::<Vec<U256>, _>("getAmountsOut", b.clone()) {
+                        Ok(v) => v.last().cloned().unwrap_or_default(),
+                        Err(e) => {
+                            // Only log if bytes are not empty (empty usually means contract exists but returned nothing/void)
+                            if !b.is_empty() {
+                                println!(
+                                    "      [Sim] Decode Error: {:?} | Raw: {}",
+                                    e,
+                                    ethers::utils::hex::encode(&b)
+                                );
+                            }
+                            U256::zero()
+                        }
+                    }
                 }
             }
             ExecutionResult::Success {

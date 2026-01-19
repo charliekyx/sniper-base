@@ -14,6 +14,9 @@ lazy_static! {
     pub static ref UNIV3_ROUTER: Address = Address::from_str("0x2626664c2603336E57B271c5C0b26F421741e481").unwrap();
     pub static ref UNIV3_QUOTER: Address = Address::from_str("0x3d4e44Eb1374240CE5F1B871ab261CD16335B76a").unwrap();
     pub static ref AERODROME_ROUTER: Address = Address::from_str("0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43").unwrap();
+    // [New] Aerodrome Slipstream (V3) Addresses (Base Mainnet)
+    pub static ref AERO_V3_ROUTER: Address = Address::from_str("0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5").unwrap();
+    pub static ref AERO_V3_QUOTER: Address = Address::from_str("0x254cF9E1E6e233aa1Ac962cb9B05b2cfeAaE15b0").unwrap();
     // PancakeSwap V3 (Base)
     pub static ref PANCAKESWAP_V3_ROUTER: Address = Address::from_str("0x1b81D678ffb9C0263b24A97847620C99d213eB14").unwrap();
     pub static ref PANCAKESWAP_V3_QUOTER: Address = Address::from_str("0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997").unwrap();
@@ -56,6 +59,7 @@ lazy_static! {
         m.insert(*ALIENBASE_ROUTER, "AlienBase".to_string());
         m.insert(*UNIV3_ROUTER, "UniV3".to_string());
         m.insert(*AERODROME_ROUTER, "Aerodrome".to_string());
+        m.insert(*AERO_V3_ROUTER, "AerodromeSlipstream".to_string());
         m.insert(*SUSHI_ROUTER, "SushiSwap".to_string());
         m.insert(*ONEINCH_ROUTER, "1inch".to_string());
         m.insert(*ODOS_ROUTER, "Odos".to_string());

@@ -1,5 +1,5 @@
 use crate::constants::{
-    AERODROME_FACTORY, AERODROME_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
+    AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
     UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_FACTORY_ROUTER,
     VIRTUALS_ROUTER, WETH_BASE, VIRTUAL_TOKEN,
 };
@@ -470,7 +470,7 @@ impl Simulator {
 
         // [新增] V3 费率探测逻辑
         let mut best_fee = 0u32;
-        let is_v3 = router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER;
+        let is_v3 = router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER || router_addr == *AERO_V3_ROUTER;
 
         // [修改] 针对 Aerodrome 做特殊编码
         let amounts_out_calldata = if let Some(pool_key) = v4_pool_key {
@@ -524,6 +524,8 @@ impl Simulator {
                 if router_addr == *PANCAKESWAP_V3_ROUTER {
                     evm.env.tx.transact_to =
                         TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
+                } else if router_addr == *AERO_V3_ROUTER {
+                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERO_V3_QUOTER.0));
                 } else {
                     evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
                 }
@@ -693,6 +695,8 @@ impl Simulator {
         } else if is_v3 {
             if router_addr == *PANCAKESWAP_V3_ROUTER {
                 evm.env.tx.transact_to = TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
+            } else if router_addr == *AERO_V3_ROUTER {
+                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERO_V3_QUOTER.0));
             } else {
                 evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
             }

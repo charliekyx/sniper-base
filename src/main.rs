@@ -6,7 +6,7 @@ mod simulation;
 
 use crate::config::AppConfig;
 use crate::constants::{
-    get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
+    get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER, ALIENBASE_ROUTER, BASESWAP_ROUTER,
     CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_DYNAMIC_V4_0, CLANKER_HOOK_STATIC, CLANKER_HOOK_STATIC_V4_0,
     PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER, ROCKETSWAP_ROUTER, SUSHI_ROUTER,
     SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER, USDC_BASE,
@@ -385,7 +385,7 @@ async fn execute_buy_and_approve(
             .insert("execute".to_string(), vec![func]);
         let router = BaseContract::from(router_abi);
         router.encode("execute", (Bytes::from(commands), inputs, deadline))?
-    } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
+    } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER || router_addr == *AERO_V3_ROUTER {
         // Uniswap V3
         let v3_swap_params_type = ParamType::Tuple(vec![
             ParamType::Address,   // tokenIn
@@ -805,7 +805,7 @@ async fn execute_smart_sell(
                     .insert("execute".to_string(), vec![func]);
                 let router = BaseContract::from(router_abi);
                 router.encode("execute", (Bytes::from(commands), inputs, deadline))?
-            } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
+            } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER || router_addr == *AERO_V3_ROUTER {
                 let v3_swap_params_type = ParamType::Tuple(vec![
                     ParamType::Address,   // tokenIn
                     ParamType::Address,   // tokenOut
@@ -1251,6 +1251,8 @@ async fn monitor_position(
 
     let target_quoter = if router_addr == *PANCAKESWAP_V3_ROUTER {
         *PANCAKESWAP_V3_QUOTER
+    } else if router_addr == *AERO_V3_ROUTER {
+        *AERO_V3_QUOTER
     } else {
         *UNIV3_QUOTER
     };
@@ -1316,7 +1318,7 @@ async fn monitor_position(
                     continue;
                 }
             }
-        } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER {
+        } else if router_addr == *UNIV3_ROUTER || router_addr == *PANCAKESWAP_V3_ROUTER || router_addr == *AERO_V3_ROUTER {
             // V3 Price Check
             let params = (token_addr, *WETH_BASE, balance, fee, U256::zero());
             match quoter_contract
@@ -1780,6 +1782,14 @@ async fn process_transaction(
                 None,
                 None,
                 "PancakeSwap V3".to_string(),
+            ));
+
+            // [Strategy] Aerodrome V3 (Slipstream)
+            strategies.push((
+                *AERO_V3_ROUTER,
+                None,
+                None,
+                "Aerodrome Slipstream (V3)".to_string(),
             ));
 
             // [Strategy] Aerodrome Direct

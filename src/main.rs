@@ -2143,6 +2143,39 @@ async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
         }
     }
 
+    // 6. 模拟测试 (Aerodrome V3) 验证 Slipstream 逻辑
+    if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
+        let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
+        println!("   [TEST] Simulating WETH -> USDC (Aerodrome V3) to verify Slipstream logic...");
+        let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
+
+        let sim_res = simulator
+            .simulate_bundle(
+                origin,
+                None,
+                *AERO_V3_ROUTER,
+                amount_in,
+                usdc,
+                None,
+                None,
+            )
+            .await;
+
+        match sim_res {
+            Ok((success, _, out, reason, _, fee)) => {
+                if success {
+                    println!(
+                        "   [PASS] Aerodrome V3 Simulation working. Output: {} USDC (Fee Tier: {})",
+                        out, fee
+                    );
+                } else {
+                    println!("   [FAIL] Aerodrome V3 Simulation failed. Reason: {}", reason);
+                }
+            }
+            Err(e) => println!("   [FAIL] Aerodrome V3 Simulation crashed: {:?}", e),
+        }
+    }
+
     println!(">>> [SELF-CHECK] Diagnostics complete.\n");
 }
 

@@ -61,38 +61,31 @@ impl NonceManager {
 type PoolKey = (Address, Address, u32, i32, Address);
 
 fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
-    // Universal Router execute(bytes commands, bytes[] inputs)
-    // Selector: 0x3593564c
-    if input.len() < 4 || &input[0..4] != [0x35, 0x93, 0x56, 0x4c] {
+    // Universal Router execute signatures:
+    // 0x3593564c: execute(bytes commands, bytes[] inputs)
+    // 0xcae6a6b3: execute(bytes commands, bytes[] inputs, uint256 deadline)
+    if input.len() < 4 {
         return None;
     }
+    let selector = &input[0..4];
 
-    // Decode execute(bytes,bytes[])
-    // let abi = parse_abi(&["function execute(bytes,bytes[])"]).ok()?;
-    // Manual ABI construction for stability
-    let mut abi = Abi::default();
-    #[allow(deprecated)]
-    let func = Function {
-        name: "execute".to_string(),
-        inputs: vec![
-            Param {
-                name: "commands".to_string(),
-                kind: ParamType::Bytes,
-                internal_type: None,
-            },
-            Param {
-                name: "inputs".to_string(),
-                kind: ParamType::Array(Box::new(ParamType::Bytes)),
-                internal_type: None,
-            },
-        ],
-        outputs: vec![],
-        constant: None,
-        state_mutability: StateMutability::NonPayable,
+    // Determine param types based on selector
+    let param_types = if selector == [0x35, 0x93, 0x56, 0x4c] {
+        vec![
+            ParamType::Bytes,
+            ParamType::Array(Box::new(ParamType::Bytes)),
+        ]
+    } else if selector == [0xca, 0xe6, 0xa6, 0xb3] {
+        vec![
+            ParamType::Bytes,
+            ParamType::Array(Box::new(ParamType::Bytes)),
+            ParamType::Uint(256), // deadline
+        ]
+    } else {
+        return None;
     };
-    abi.functions.insert("execute".to_string(), vec![func]);
-    let function = abi.function("execute").ok()?;
-    let decoded = function.decode_input(&input[4..]).ok()?;
+
+    let decoded = ethers::abi::decode(&param_types, &input[4..]).ok()?;
 
     let commands: Vec<u8> = decoded[0].clone().into_bytes()?;
     let inputs: Vec<Bytes> = decoded[1]

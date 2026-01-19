@@ -47,6 +47,7 @@ lazy_static! {
     pub static ref VIRTUALS_ROUTER: Address = Address::from_str("0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b").unwrap();
     // Virtuals Protocol Agent Factory / Router (Observed from tx)
     pub static ref VIRTUALS_FACTORY_ROUTER: Address = Address::from_str("0xc479b79e53c1065e5e56a6da78e9d634b4ae1e5d").unwrap();
+    pub static ref VIRTUAL_TOKEN: Address = Address::from_str("0x0b3e328455c4059EEb9e3f84b5543F74E24e7E1b").unwrap();
 
     // High performance lookup map
     pub static ref ROUTER_NAMES: HashMap<Address, String> = {

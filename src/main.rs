@@ -2183,6 +2183,35 @@ async fn main() -> anyhow::Result<()> {
     // [新增] 在主循环开始前运行自检
     run_self_check(provider_arc.clone(), simulator.clone()).await;
 
+    // [新增] 手动模拟测试 (Manual Simulation Test)
+    // 硬编码测试地址: 0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d (Luna)
+    {
+        let token_str = "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d";
+        if let Ok(token_addr) = Address::from_str(token_str) {
+            println!("\n>>> [MANUAL TEST] Starting simulation for: {:?}", token_addr);
+            // 使用 Aerodrome 路由进行测试 (支持 Virtuals)
+            let router = *AERODROME_ROUTER; 
+            let amount = U256::from(10000000000000000u64); // 0.01 ETH
+
+            // 尝试 Virtuals Hop 路径
+            let path = Some(vec![*WETH_BASE, *crate::constants::VIRTUAL_TOKEN, token_addr]);
+            
+            match simulator.simulate_bundle(client.address(), None, router, amount, token_addr, None, path).await {
+                Ok((success, profit, tokens, reason, gas, _)) => {
+                    println!(">>> [MANUAL TEST] Result: Success={}", success);
+                    println!("    Profit (Wei): {}", profit);
+                    println!("    Expected Tokens: {}", tokens);
+                    println!("    Reason: {}", reason);
+                    println!("    Gas Used: {}", gas);
+                }
+                Err(e) => {
+                    println!(">>> [MANUAL TEST] Simulation Error: {:?}", e);
+                }
+            }
+            println!(">>> [MANUAL TEST] Finished. Continuing to live scan...\n");
+        }
+    }
+
     let targets = config.get_targets();
 
     // 恢复之前的持仓

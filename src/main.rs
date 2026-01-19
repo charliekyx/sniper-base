@@ -1830,15 +1830,22 @@ async fn process_transaction(
             println!("   [Strategy] Scanning markets for liquidity...");
             let mut debug_errors = Vec::new();
             let mut best_path = vec![*WETH_BASE, token_addr]; // Default
+            
+            // [修复] 最佳结果跟踪变量
+            let mut best_sim_res = sim_result_tuple.clone();
+            let mut best_router_addr = effective_router;
+            let mut best_pk = v4_pool_key;
+            let mut best_path_vec = best_path.clone();
+            let mut best_desc_str = String::new();
+            let mut found_any = false;
 
             for (router, key, path, desc) in strategies {
-                effective_router = router;
                 println!("   [Strategy] Attempting: {} (Router: {:?})", desc, router);
                 let sim_res = simulator
                     .simulate_bundle(
                         client.address(),
                         None,
-                        effective_router,
+                        router,
                         buy_amt,
                         token_addr,
                         key, // 使用当前策略的 Key (可能是提取的，可能是猜的，也可能是 None)
@@ -1848,37 +1855,52 @@ async fn process_transaction(
 
                 match sim_res {
                     Ok(res) => {
-                        sim_result_tuple = res;
+                        let (success, _, amount_out, ref reason, _, _) = res;
                         println!(
                             "      -> Sim Result: Success={}, Gas={}, Reason='{}', Out={}",
-                            sim_result_tuple.0,
-                            sim_result_tuple.4,
-                            sim_result_tuple.3,
-                            sim_result_tuple.2
+                            success, res.4, reason, amount_out
                         );
-                        if sim_result_tuple.0 {
-                            println!("   [Strategy] Liquidity found via [{}]!", desc);
-                            if key.is_some() {
-                                v4_pool_key = key;
-                            }
-                            if let Some(p) = path {
-                                best_path = p;
-                            }
+                        
+                        if success {
+                            // [策略优化] 比较当前结果是否比之前的更好
+                            let is_better = if !found_any {
+                                true // 只要成功就比没成功好
+                            } else {
+                                let prev_reason = &best_sim_res.3;
+                                let prev_out = best_sim_res.2;
+                                let curr_prof = reason == "Profitable";
+                                let prev_prof = prev_reason == "Profitable";
+                                
+                                if curr_prof && !prev_prof {
+                                    true // 盈利优于亏损
+                                } else if curr_prof == prev_prof {
+                                    amount_out > prev_out // 同状态下，产出高者优
+                                } else {
+                                    false
+                                }
+                            };
 
-                            // [修复] 严格模式：如果模拟结果显示会亏损（Sellable but Loss），
-                            // 除非是极小额测试，否则这通常意味着有税。
-                            if sim_result_tuple.3 == "Sellable but Loss" {
-                                println!("      [WARN] Strategy yields immediate loss (Tax/Gas).");
-                                // 如果你希望更安全，可以在这里取消注释下面的代码来跳过此类交易：
-                                // if !config.shadow_mode {
-                                //     println!("      [SKIP] Skipping due to immediate loss risk.");
-                                //     continue;
-                                // }
-                            }
+                            if is_better {
+                                found_any = true;
+                                best_sim_res = res.clone();
+                                best_router_addr = router;
+                                best_pk = key;
+                                if let Some(p) = path {
+                                    best_path_vec = p;
+                                } else {
+                                    best_path_vec = vec![*WETH_BASE, token_addr];
+                                }
+                                best_desc_str = desc.clone();
 
-                            break;
+                                if reason == "Profitable" {
+                                    println!("   [Strategy] Found PROFITABLE route via [{}]. Stopping search.", desc);
+                                    break;
+                                } else {
+                                    println!("   [Strategy] Found LOSSY route via [{}]. Continuing search for better...", desc);
+                                }
+                            }
                         } else {
-                            debug_errors.push(format!("[{}: {}]", desc, sim_result_tuple.3));
+                            debug_errors.push(format!("[{}: {}]", desc, reason));
                         }
                     }
                     Err(e) => {
@@ -1888,8 +1910,16 @@ async fn process_transaction(
                 }
             }
 
-            let (sim_ok, _profit_wei, expected_tokens, reason, gas_used, best_fee) =
-                sim_result_tuple.clone();
+            // 应用最佳结果
+            sim_result_tuple = best_sim_res;
+            if found_any {
+                effective_router = best_router_addr;
+                v4_pool_key = best_pk;
+                best_path = best_path_vec;
+                println!("   [Strategy] Selected Best Route: {} (Reason: {})", best_desc_str, sim_result_tuple.3);
+            }
+
+            let (sim_ok, _profit_wei, expected_tokens, reason, gas_used, best_fee) = sim_result_tuple.clone();
 
             if !sim_ok {
                 println!("   [ABORT] All strategies failed.");

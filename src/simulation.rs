@@ -850,10 +850,12 @@ impl Simulator {
             }
         };
 
-        println!(
-            "      [Sim] Quote Success. Expected Out: {}",
-            expected_tokens
-        );
+        if !expected_tokens.is_zero() {
+            println!(
+                "      [Sim] Quote Success. Expected Out: {}",
+                expected_tokens
+            );
+        }
 
         // [新增] 如果 Quote 结果为 0，直接终止，不要尝试买入（节省资源并减少误报）
         // [Fix] For Virtuals, the buy function might not return the amount (void), so we proceed even if 0 to check balance change

@@ -1,5 +1,4 @@
 use crate::config::AppConfig;
-use crate::constants::WETH_BASE;
 use crate::decoder::PoolKey;
 use crate::strategies::{get_strategy_for_position, UniswapV4Strategy};
 use chrono::Local;
@@ -12,7 +11,7 @@ pub async fn execute_smart_sell(
     client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     router_addr: Address,
     token_in: Address,
-    token_out: Address,
+    _token_out: Address,
     amount_token: U256,
     config: &AppConfig,
     is_panic: bool,

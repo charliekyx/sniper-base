@@ -11,8 +11,8 @@ use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token as Abi
 pub trait DexStrategy: Send + Sync {
     fn name(&self) -> &str;
     
-    /// 返回 (目标合约地址, 调用数据, 发送的 ETH 金额) 用于获取报价
-    fn encode_quote(&self, amount_in: U256, token_out: Address) -> Result<(Address, Bytes, U256)>;
+    /// 返回 (目标合约地址, 调用数据, 发送的 ETH 金额) 用于获取报价 (支持 token_in -> token_out)
+    fn encode_quote(&self, amount_in: U256, token_in: Address, token_out: Address) -> Result<(Address, Bytes, U256)>;
     
     /// 解码报价返回的原始字节，得到预期的 Token 数量
     fn decode_quote(&self, output: Bytes) -> Result<U256>;
@@ -42,8 +42,8 @@ pub struct UniswapV2Strategy {
 impl DexStrategy for UniswapV2Strategy {
     fn name(&self) -> &str { &self.name }
 
-    fn encode_quote(&self, amount_in: U256, token_out: Address) -> Result<(Address, Bytes, U256)> {
-        let path = vec![*WETH_BASE, token_out];
+    fn encode_quote(&self, amount_in: U256, token_in: Address, token_out: Address) -> Result<(Address, Bytes, U256)> {
+        let path = vec![token_in, token_out];
         let data = BaseContract::from(v2_abi()).encode("getAmountsOut", (amount_in, path))?;
         Ok((self.router, data.0.into(), U256::zero()))
     }
@@ -79,10 +79,17 @@ pub struct AerodromeV2Strategy {
 impl DexStrategy for AerodromeV2Strategy {
     fn name(&self) -> &str { &self.name }
 
-    fn encode_quote(&self, amount_in: U256, _token_out: Address) -> Result<(Address, Bytes, U256)> {
+    fn encode_quote(&self, amount_in: U256, token_in: Address, _token_out: Address) -> Result<(Address, Bytes, U256)> {
+        let path = if token_in == self.path[0] {
+            self.path.clone()
+        } else {
+            let mut p = self.path.clone();
+            p.reverse();
+            p
+        };
         let mut routes = Vec::new();
-        for i in 0..self.path.len() - 1 {
-            routes.push((self.path[i], self.path[i+1], false, self.factory));
+        for i in 0..path.len() - 1 {
+            routes.push((path[i], path[i+1], false, self.factory));
         }
         let data = BaseContract::from(aero_abi()).encode("getAmountsOut", (amount_in, routes))?;
         Ok((self.router, data.0.into(), U256::zero()))
@@ -127,8 +134,8 @@ impl DexStrategy for UniswapV4Strategy {
     fn pool_key(&self) -> Option<PoolKey> { Some(self.pool_key) }
     fn fee(&self) -> u32 { self.pool_key.2 }
 
-    fn encode_quote(&self, amount_in: U256, token_out: Address) -> Result<(Address, Bytes, U256)> {
-        let zero_for_one = *WETH_BASE < token_out;
+    fn encode_quote(&self, amount_in: U256, token_in: Address, token_out: Address) -> Result<(Address, Bytes, U256)> {
+        let zero_for_one = token_in < token_out;
         let pk_token = AbiToken::Tuple(vec![
             AbiToken::Address(self.pool_key.0),
             AbiToken::Address(self.pool_key.1),
@@ -148,7 +155,7 @@ impl DexStrategy for UniswapV4Strategy {
         Ok(amount_out)
     }
 
-    fn encode_buy(&self, amount_in: U256, token_out: Address, recipient: Address, deadline: U256, amount_out_min: U256) -> Result<(Address, Bytes, U256)> {
+    fn encode_buy(&self, amount_in: U256, token_out: Address, _recipient: Address, deadline: U256, amount_out_min: U256) -> Result<(Address, Bytes, U256)> {
         let zero_for_one = *WETH_BASE < token_out;
         let pk_token = AbiToken::Tuple(vec![
             AbiToken::Address(self.pool_key.0),
@@ -200,9 +207,14 @@ impl DexStrategy for VirtualsStrategy {
     fn name(&self) -> &str { &self.name }
     fn quote_requires_commit(&self) -> bool { true }
 
-    fn encode_quote(&self, amount_in: U256, token_out: Address) -> Result<(Address, Bytes, U256)> {
-        let data = BaseContract::from(virtuals_abi()).encode("buy", (token_out, amount_in, U256::zero()))?;
-        Ok((*VIRTUALS_FACTORY_ROUTER, data.0.into(), amount_in))
+    fn encode_quote(&self, amount_in: U256, token_in: Address, token_out: Address) -> Result<(Address, Bytes, U256)> {
+        if token_in == *WETH_BASE {
+            let data = BaseContract::from(virtuals_abi()).encode("buy", (token_out, amount_in, U256::zero()))?;
+            Ok((*VIRTUALS_FACTORY_ROUTER, data.0.into(), amount_in))
+        } else {
+            let data = BaseContract::from(virtuals_abi()).encode("getSellPrice", (token_in, amount_in))?;
+            Ok((*VIRTUALS_FACTORY_ROUTER, data.0.into(), U256::zero()))
+        }
     }
 
     fn decode_quote(&self, output: Bytes) -> Result<U256> {
@@ -235,8 +247,8 @@ impl DexStrategy for UniswapV3Strategy {
     fn name(&self) -> &str { &self.name }
     fn fee(&self) -> u32 { self.fee }
 
-    fn encode_quote(&self, amount_in: U256, token_out: Address) -> Result<(Address, Bytes, U256)> {
-        let params = (*WETH_BASE, token_out, amount_in, self.fee, U256::zero());
+    fn encode_quote(&self, amount_in: U256, token_in: Address, token_out: Address) -> Result<(Address, Bytes, U256)> {
+        let params = (token_in, token_out, amount_in, self.fee, U256::zero());
         let data = BaseContract::from(v3_quoter_abi()).encode("quoteExactInputSingle", (params,))?;
         Ok((self.quoter, data.0.into(), U256::zero()))
     }
@@ -427,5 +439,13 @@ fn virtuals_abi() -> Abi {
         state_mutability: StateMutability::Payable,
     };
     abi.functions.insert("buy".to_string(), vec![buy]);
+    let get_sell_price = Function {
+        name: "getSellPrice".to_string(),
+        inputs: vec![Param { name: "token".to_string(), kind: ParamType::Address, internal_type: None }, Param { name: "amount".to_string(), kind: ParamType::Uint(256), internal_type: None }],
+        outputs: vec![Param { name: "price".to_string(), kind: ParamType::Uint(256), internal_type: None }],
+        constant: Some(true),
+        state_mutability: StateMutability::View,
+    };
+    abi.functions.insert("getSellPrice".to_string(), vec![get_sell_price]);
     abi
 }

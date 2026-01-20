@@ -1,6 +1,7 @@
 use crate::constants::{
-    AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_ROUTER, CLANKER_HOOK_DYNAMIC, CLANKER_HOOK_STATIC, UNIV3_QUOTER, UNIV3_ROUTER,
-    UNIV4_QUOTER, UNIVERSAL_ROUTER, VIRTUALS_ROUTER, VIRTUAL_TOKEN, WETH_BASE, AERO_V3_QUOTER
+    AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER, CLANKER_HOOK_DYNAMIC,
+    CLANKER_HOOK_STATIC, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
+    VIRTUALS_ROUTER, VIRTUAL_TOKEN, WETH_BASE,
 };
 use crate::simulation::Simulator;
 use crate::strategies::*;
@@ -194,7 +195,10 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) 
                         out, fee
                     );
                 } else {
-                    error!("   [FAIL] Aerodrome V3 Simulation failed. Reason: {}", reason);
+                    error!(
+                        "   [FAIL] Aerodrome V3 Simulation failed. Reason: {}",
+                        reason
+                    );
                 }
             }
             Err(e) => error!("   [FAIL] Aerodrome V3 Simulation crashed: {:?}", e),
@@ -208,20 +212,24 @@ pub async fn run_manual_test(simulator: Simulator, owner: Address) {
     // 硬编码测试地址: 0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d (Luna)
     let token_str = "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d";
     if let Ok(token_addr) = Address::from_str(token_str) {
-        info!("\n>>> [MANUAL TEST] Starting simulation for: {:?}", token_addr);
+        info!(
+            "\n>>> [MANUAL TEST] Starting simulation for: {:?}",
+            token_addr
+        );
         // 使用 Aerodrome 路由进行测试 (支持 Virtuals)
         let router = *AERODROME_ROUTER;
         let amount = U256::from(10000000000000000u64); // 0.01 ETH
 
         let strategy = Arc::new(AerodromeV2Strategy {
-            router,    
+            router,
             factory: *AERODROME_FACTORY,
             path: vec![*WETH_BASE, *VIRTUAL_TOKEN, token_addr],
             name: "Manual Test".into(),
         });
 
         match simulator
-            .simulate_bundle(owner, strategy, amount, token_addr).await
+            .simulate_bundle(owner, strategy, amount, token_addr)
+            .await
         {
             Ok((success, profit, tokens, reason, gas, _)) => {
                 info!(">>> [MANUAL TEST] Result: Success={}", success);

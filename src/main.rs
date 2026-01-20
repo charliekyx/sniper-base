@@ -3,9 +3,9 @@ mod config;
 mod constants;
 mod decoder;
 mod diagnostics;
+mod lock_manager;
 mod logger;
 mod monitor;
-mod lock_manager;
 mod nonce;
 mod position_dao;
 mod processor;
@@ -21,6 +21,7 @@ use nonce::NonceManager;
 use position_dao::{init_storage, load_all_positions};
 use processor::process_transaction;
 use simulation::Simulator;
+use strategies::get_strategy_for_position;
 
 use dotenv::dotenv;
 use ethers::prelude::*;
@@ -31,7 +32,6 @@ use tokio::task;
 use tracing::{error, info};
 use tracing_subscriber::fmt;
 
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 初始化阶段
@@ -40,9 +40,14 @@ async fn main() -> anyhow::Result<()> {
     let config = AppConfig::from_env();
     init_storage();
     // 使用配置中的 RPC_URL (IPC 路径)
-    let provider = Provider::<Ipc>::connect_ipc(&config.rpc_url).await.expect("[FATAL] Failed to connect to IPC");
+    let provider = Provider::<Ipc>::connect_ipc(&config.rpc_url)
+        .await
+        .expect("[FATAL] Failed to connect to IPC");
     if let Err(e) = provider.get_block_number().await {
-        panic!("[FATAL] Node connection test failed. Is the node running? Error: {:?}", e);
+        panic!(
+            "[FATAL] Node connection test failed. Is the node running? Error: {:?}",
+            e
+        );
     }
 
     let chain_id = provider.get_chainid().await?.as_u64();
@@ -97,16 +102,19 @@ async fn main() -> anyhow::Result<()> {
             info!("Resuming monitor for {:?}", pos.token_address);
             let c = client.clone();
             let cfg = config.clone();
+            let strategy = Arc::from(get_strategy_for_position(
+                pos.router_address,
+                pos.fee.unwrap_or(0),
+                pos.token_address,
+            ));
             task::spawn(monitor_position(
                 c,
-                pos.router_address,
+                strategy,
                 pos.token_address,
                 pos.initial_cost_eth,
                 cfg,
                 lock_manager.clone(),
                 None, // 恢复持仓时，如果是 Shadow Mode 且没有持久化虚拟余额，这里可能会直接退出，这是预期行为
-                pos.fee.unwrap_or(0),
-                None, // Persistence struct needs update to store PoolKey if we want to resume V4. For now None.
             ));
         }
     }

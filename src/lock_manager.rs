@@ -1,6 +1,6 @@
+use ethers::types::Address;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use ethers::types::Address;
 
 #[derive(Clone, Debug, Default)]
 pub struct LockManager {

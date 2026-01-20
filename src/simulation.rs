@@ -469,7 +469,7 @@ impl Simulator {
             // [Optimized] Smart Routing Logic
 
             // [新增] V3 费率探测逻辑
-            let (quote_target, quote_data, quote_value) = strategy.encode_quote(amount_in_eth, token_out)?;
+            let (quote_target, quote_data, quote_value) = strategy.encode_quote(amount_in_eth, *WETH_BASE, token_out)?;
 
             evm.env.tx.caller = my_wallet;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(quote_target.0));

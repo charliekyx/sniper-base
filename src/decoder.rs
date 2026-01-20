@@ -135,10 +135,18 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
     };
 
     if sig == [0x7f, 0xf3, 0x6a, 0xb5] || sig == [0xb6, 0xf9, 0xde, 0x95] {
-        let action = if sig[0] == 0x7f { "Buy_ETH->Token" } else { "Buy_Fee_ETH->Token" };
+        let action = if sig[0] == 0x7f {
+            "Buy_ETH->Token"
+        } else {
+            "Buy_Fee_ETH->Token"
+        };
         return get_path_token(1, true).map(|t| (action.to_string(), t));
     } else if sig == [0x18, 0xcb, 0xaf, 0xe5] || sig == [0x79, 0x1a, 0xc9, 0x47] {
-        let action = if sig[0] == 0x18 { "Sell_Token->ETH" } else { "Sell_Fee_Token->ETH" };
+        let action = if sig[0] == 0x18 {
+            "Sell_Token->ETH"
+        } else {
+            "Sell_Fee_Token->ETH"
+        };
         return get_path_token(2, false).map(|t| (action.to_string(), t));
     }
     // ... (Simplified for brevity, full logic from main.rs should be here if needed, but sticking to provided context logic)
@@ -152,9 +160,13 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let path_offset = read_usize(offset_ptr)?;
         let len_ptr = 4 + path_offset;
         let path_len = read_usize(len_ptr)?;
-        if path_len < 40 { return None; }
+        if path_len < 40 {
+            return None;
+        }
         let path_start = len_ptr + 32;
-        if path_start + path_len > input.len() { return None; }
+        if path_start + path_len > input.len() {
+            return None;
+        }
         let path_bytes = &input[path_start..path_start + path_len];
         let token_in = Address::from_slice(&path_bytes[0..20]);
         let token_out = Address::from_slice(&path_bytes[path_len - 20..path_len]);
@@ -173,10 +185,15 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let path_offset = read_usize(offset_ptr)?;
         let len_ptr = 4 + path_offset;
         let path_len = read_usize(len_ptr)?;
-        if path_len < 20 { return None; }
+        if path_len < 20 {
+            return None;
+        }
         let path_start = len_ptr + 32;
         let token_out_start = path_start + path_len - 20;
-        return Some(("Buy_V3_Multi".to_string(), Address::from_slice(&input[token_out_start..token_out_start + 20])));
+        return Some((
+            "Buy_V3_Multi".to_string(),
+            Address::from_slice(&input[token_out_start..token_out_start + 20]),
+        ));
     } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
         return Some(("Universal_Interaction".to_string(), Address::zero()));
     }

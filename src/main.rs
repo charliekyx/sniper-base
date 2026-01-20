@@ -14,7 +14,7 @@ mod simulation;
 mod strategies;
 
 use config::AppConfig;
-use diagnostics::{run_manual_test, run_self_check};
+use diagnostics::run_self_check;
 use lock_manager::LockManager;
 use monitor::monitor_position;
 use nonce::NonceManager;
@@ -81,11 +81,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 在主循环开始前运行自检
-    run_self_check(provider_arc.clone(), simulator.clone()).await;
-
-    // 手动模拟测试 (Manual Simulation Test)
-    // 硬编码测试地址: 0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d (Luna)
-    run_manual_test(simulator.clone(), client.address()).await;
+    run_self_check(provider_arc.clone(), simulator.clone(), client.address()).await;
 
     let targets = config.get_targets();
 
@@ -124,7 +120,7 @@ async fn main() -> anyhow::Result<()> {
         .await?
         .as_u64();
     let nonce_manager = Arc::new(NonceManager::new(start_nonce));
-    info!(">>> Initialized Nonce: {}", start_nonce);
+    info!("Initialized Nonce: {}", start_nonce);
 
     let (tx_sender, mut rx_receiver) = mpsc::channel::<Transaction>(10000);
     let mut stream = provider_arc.subscribe_blocks().await?;
@@ -157,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
     while let Some(block) = stream.next().await {
         if last_heartbeat.elapsed() >= std::time::Duration::from_secs(3600) {
             if let Some(h) = block.hash {
-                info!(">>> [HEARTBEAT] Still scanning... Latest Block: {:?}", h);
+                info!("HEARTBEAT] Still scanning... Latest Block: {:?}", h);
             }
             last_heartbeat = std::time::Instant::now();
         }

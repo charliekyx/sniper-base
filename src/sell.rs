@@ -22,7 +22,10 @@ pub async fn execute_smart_sell(
 
     // 1. 获取对应的策略对象
     let strategy = if let Some(pk) = v4_pool_key {
-        Box::new(UniswapV4Strategy { pool_key: pk, name: "V4 Sell".into() })
+        Box::new(UniswapV4Strategy {
+            pool_key: pk,
+            name: "V4 Sell".into(),
+        })
     } else {
         get_strategy_for_position(router_addr, fee, token_in)
     };
@@ -34,7 +37,8 @@ pub async fn execute_smart_sell(
 
         async move {
             // 2. 直接调用策略的编码方法
-            let (target_router, calldata, _) = strategy.encode_sell(amt, token_in, client.address(), deadline, U256::zero())?;
+            let (target_router, calldata, _) =
+                strategy.encode_sell(amt, token_in, client.address(), deadline, U256::zero())?;
 
             let base_fee = client.provider().get_gas_price().await?;
             let prio_fee_val = U256::from(priority_fee * 1_000_000_000 * gas_mult);

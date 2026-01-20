@@ -149,6 +149,48 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         };
         return get_path_token(2, false).map(|t| (action.to_string(), t));
     }
+    // [新增] Virtuals Protocol Support
+    // buy(address token, uint256 amountIn, uint256 minAmountOut) -> 0xf69ac97a
+    else if sig == [0xf6, 0x9a, 0xc9, 0x7a] {
+        return read_address(4).map(|t| ("Buy_Virtuals".to_string(), t));
+    }
+    // sell(address token, uint256 amountIn, uint256 minAmountOut) -> 0x831e10eb
+    else if sig == [0x83, 0x1e, 0x10, 0xeb] {
+        return read_address(4).map(|t| ("Sell_Virtuals".to_string(), t));
+    }
+    // [新增] Aerodrome V2 Support (Solidly Fork)
+    // swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, Route[] routes, address to, uint256 deadline)
+    // Selector: 0x7bf17d05
+    else if sig == [0x7b, 0xf1, 0x7d, 0x05] {
+        // 参数布局:
+        // 0: amountOutMin
+        // 1: offset to routes (usually 0x80 / 128)
+        // 2: to (recipient)
+        // 3: deadline
+        let routes_offset = read_usize(36)?;
+        let len_ptr = 4 + routes_offset;
+        let routes_len = read_usize(len_ptr)?;
+        if routes_len == 0 {
+            return None;
+        }
+        // Route Struct: (address from, address to, bool stable, address factory)
+        // 每个 Struct 占用 4 * 32 = 128 bytes (ABI 静态编码)
+        // 我们需要最后一个 Route 的 'to' 字段 (即最终买入的 Token)
+        // 最后一个 Route 的起始位置
+        let last_route_start = len_ptr + 32 + (routes_len - 1) * 128;
+        // 'to' 是结构体的第 2 个字段 (offset 32)
+        return read_address(last_route_start + 32).map(|t| ("Buy_Aerodrome".to_string(), t));
+    }
+    // swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, Route[] routes, address to, uint256 deadline)
+    // Selector: 0x45013492
+    else if sig == [0x45, 0x01, 0x34, 0x92] {
+        // 卖出操作，Token In 是第一个 Route 的 'from'
+        let routes_offset = read_usize(68)?; // 第3个参数
+        let len_ptr = 4 + routes_offset;
+        // 第一个 Route 的起始位置 = len_ptr + 32
+        // 'from' 是结构体的第 1 个字段 (offset 0)
+        return read_address(len_ptr + 32).map(|t| ("Sell_Aerodrome".to_string(), t));
+    }
     // ... (Simplified for brevity, full logic from main.rs should be here if needed, but sticking to provided context logic)
     // Note: The original code had more branches (Odos, V3, Universal). I will include them to be safe.
     else if sig == [0x38, 0xed, 0x17, 0x39] || sig == [0x5c, 0x11, 0xd7, 0x95] {
@@ -178,9 +220,14 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             }
             return Some(("Sell_Odos".to_string(), token_in));
         }
-    } else if sig == [0x41, 0x4b, 0xf3, 0x89] {
+    } else if sig == [0x41, 0x4b, 0xf3, 0x89] || sig == [0x04, 0xe4, 0x5a, 0xaf] {
+        // 0x414bf389: exactInputSingle (Old Router)
+        // 0x04e45aaf: exactInputSingle (New SwapRouter02)
+        // 两个版本的 tokenOut 都在结构体的第二个位置 (offset 32)，可以直接复用
         return read_address(36).map(|t| ("Buy_V3_Single".to_string(), t));
-    } else if sig == [0xc0, 0x4b, 0x8d, 0x59] {
+    } else if sig == [0xc0, 0x4b, 0x8d, 0x59] || sig == [0xb8, 0x58, 0x18, 0x3f] {
+        // 0xc04b8d59: exactInput (Old Router)
+        // 0xb858183f: exactInput (New SwapRouter02)
         let offset_ptr = 4;
         let path_offset = read_usize(offset_ptr)?;
         let len_ptr = 4 + path_offset;
@@ -194,8 +241,74 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
             "Buy_V3_Multi".to_string(),
             Address::from_slice(&input[token_out_start..token_out_start + 20]),
         ));
+    } else if sig == [0xac, 0x96, 0x50, 0xd8] {
+        // Uniswap V3 Multicall(bytes[] data)
+        // 这是一个包装器，通常包含 swap。为了简单起见，我们标记它，具体的代币解析可能需要递归解码
+        return Some(("Multicall_V3".to_string(), Address::zero()));
     } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
         return Some(("Universal_Interaction".to_string(), Address::zero()));
     }
     None
+}
+
+/// 解析 EVM Revert 原因，提供更友好的报错信息
+pub fn decode_revert_reason(output: &[u8]) -> String {
+    if output.len() < 4 {
+        return "Revert(NoData)".to_string();
+    }
+    let selector = &output[0..4];
+
+    // 1. Error(string) selector: 0x08c379a0
+    if selector == [0x08, 0xc3, 0x79, 0xa0] {
+        if let Ok(decoded) = ethers::abi::decode(&[ParamType::String], &output[4..]) {
+            if let Some(reason) = decoded[0].clone().into_string() {
+                return format!("Revert: {}", reason);
+            }
+        }
+    }
+    // 2. Panic(uint256) selector: 0x4e487b71
+    // 优化：将 Panic 代码转换为可读的错误描述
+    else if selector == [0x4e, 0x48, 0x7b, 0x71] {
+        if let Ok(decoded) = ethers::abi::decode(&[ParamType::Uint(256)], &output[4..]) {
+            let code = decoded[0].clone().into_uint().unwrap_or_default().as_u64();
+            let reason = match code {
+                0x01 => "Assertion failed",
+                0x11 => "Arithmetic overflow/underflow",
+                0x12 => "Division by zero",
+                0x21 => "Enum index out of bounds",
+                0x22 => "Storage byte array incorrectly encoded",
+                0x31 => "Pop on empty array",
+                0x32 => "Array index out of bounds",
+                0x41 => "Memory allocation too large",
+                0x51 => "Zero-initialized internal function",
+                _ => "Unknown Panic",
+            };
+            return format!("Panic(0x{:02x}): {}", code, reason);
+        }
+    }
+    // 3. V4 QuoteFailure(bytes) selector: 0x6190b2b0
+    else if selector == [0x61, 0x90, 0xb2, 0xb0] {
+        if let Ok(decoded) = ethers::abi::decode(&[ParamType::Bytes], &output[4..]) {
+            if let Some(inner_bytes) = decoded[0].clone().into_bytes() {
+                if inner_bytes.len() >= 4 {
+                    let inner_sig = &inner_bytes[0..4];
+                    // PoolNotInitialized selector: 0x86aa3070
+                    if inner_sig == [0x86, 0xaa, 0x30, 0x70] {
+                        return "Revert: PoolNotInitialized (V4)".to_string();
+                    }
+                    // Clanker V4 custom error (0x486aa307)
+                    if inner_sig == [0x48, 0x6a, 0xa3, 0x07] {
+                        return "Revert: V4 Pool Not Found (486aa307)".to_string();
+                    }
+                    // Another V4 error (0x90bfb865)
+                    if inner_sig == [0x90, 0xbf, 0xb8, 0x65] {
+                        return "Revert: V4 Pool Not Found (90bfb865)".to_string();
+                    }
+                }
+                return format!("Revert(V4): {}", ethers::utils::hex::encode(inner_bytes));
+            }
+        }
+    }
+
+    format!("Revert(Hex): {}", ethers::utils::hex::encode(output))
 }

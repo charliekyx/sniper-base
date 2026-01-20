@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
-pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) {
+pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, owner: Address) {
     info!(">>> [SELF-CHECK] Running startup diagnostics...");
 
     // 1. 检查关键合约是否存在 (验证地址配置是否正确)
@@ -205,17 +205,11 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator) 
         }
     }
 
-    info!(">>> [SELF-CHECK] Diagnostics complete.\n");
-}
-
-pub async fn run_manual_test(simulator: Simulator, owner: Address) {
+    // 7. Manual Test (Merged)
     // 硬编码测试地址: 0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d (Luna)
     let token_str = "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d";
     if let Ok(token_addr) = Address::from_str(token_str) {
-        info!(
-            "\n>>> [MANUAL TEST] Starting simulation for: {:?}",
-            token_addr
-        );
+        info!("   [MANUAL TEST] Starting simulation for: {:?}", token_addr);
         // 使用 Aerodrome 路由进行测试 (支持 Virtuals)
         let router = *AERODROME_ROUTER;
         let amount = U256::from(10000000000000000u64); // 0.01 ETH
@@ -232,16 +226,17 @@ pub async fn run_manual_test(simulator: Simulator, owner: Address) {
             .await
         {
             Ok((success, profit, tokens, reason, gas, _)) => {
-                info!(">>> [MANUAL TEST] Result: Success={}", success);
-                info!("    Profit (Wei): {}", profit);
-                info!("    Expected Tokens: {}", tokens);
-                info!("    Reason: {}", reason);
-                info!("    Gas Used: {}", gas);
+                info!(
+                    "   [MANUAL TEST] Result: Success={}, Profit={}, Tokens={}, Gas={}",
+                    success, profit, tokens, gas
+                );
+                info!("   [MANUAL TEST] Reason: {}", reason);
             }
             Err(e) => {
-                error!(">>> [MANUAL TEST] Simulation Error: {:?}", e);
+                error!("   [MANUAL TEST] Simulation Error: {:?}", e);
             }
         }
-        info!(">>> [MANUAL TEST] Finished. Continuing to live scan...\n");
     }
+
+    info!(">>> [SELF-CHECK] Diagnostics complete.\n");
 }

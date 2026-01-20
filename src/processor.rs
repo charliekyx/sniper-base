@@ -1,10 +1,6 @@
 use crate::buy::execute_buy_and_approve;
 use crate::config::AppConfig;
-use crate::constants::{
-    get_router_name, AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER,
-    ALIENBASE_ROUTER, BASESWAP_ROUTER, PANCAKESWAP_V3_QUOTER, PANCAKESWAP_V3_ROUTER,
-    ROCKETSWAP_ROUTER, SUSHI_ROUTER, SWAPBASED_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, WETH_BASE,
-};
+use crate::constants::{get_router_name, WETH_BASE};
 use crate::decoder::{decode_router_input, extract_pool_key_from_universal_router};
 use crate::lock_manager::LockManager;
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
@@ -34,15 +30,31 @@ pub async fn process_transaction(
     if let Some(to) = tx.to {
         let is_from_target = targets.contains(&tx.from);
         if is_from_target {
-            let selector_bytes = if tx.input.len() >= 4 {
-                &tx.input[0..4]
-            } else {
-                &[]
-            };
-            let selector = ethers::utils::hex::encode(selector_bytes);
-            if selector == "095ea7b3" || selector == "a9059cbb" {
-                return;
+            // 直接比较原始字节，避免 hex::encode 的内存分配
+            if tx.input.len() >= 4 {
+                let sig = &tx.input[0..4];
+                // 0x095ea7b3: approve(address,uint256)
+                // 0xa9059cbb: transfer(address,uint256)
+                // 0x23b872dd: transferFrom(address,address,uint256)
+                // 0xd0e30db0: deposit() (WETH wrap)
+                // 0x2e1a7d4d: withdraw(uint256) (WETH unwrap)
+                if sig == [0x09, 0x5e, 0xa7, 0xb3]
+                    || sig == [0xa9, 0x05, 0x9c, 0xbb]
+                    || sig == [0x23, 0xb8, 0x72, 0xdd]
+                    || sig == [0xd0, 0xe3, 0x0d, 0xb0]
+                    || sig == [0x2e, 0x1a, 0x7d, 0x4d]
+                {
+                    return;
+                }
             }
+
+            // 只有未被过滤的交易才进行 hex 编码用于日志显示
+            let selector = if tx.input.len() >= 4 {
+                ethers::utils::hex::encode(&tx.input[0..4])
+            } else {
+                "0x".to_string()
+            };
+
             let msg = format!(
                 "[ACTIVITY] Target: {:?} | To: {:?} | Selector: 0x{}",
                 tx.from, to, selector
@@ -55,11 +67,11 @@ pub async fn process_transaction(
         let decoded = decode_router_input(&tx.input);
         let mut v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
 
-        if let Some(pk) = v4_pool_key {
-            if is_from_target {
-                debug!("   [DEBUG] Extracted V4 PoolKey: Token0={:?}, Token1={:?}, Fee={}, TickSpacing={}, Hooks={:?}", pk.0, pk.1, pk.2, pk.3, pk.4);
-            }
-        }
+        // if let Some(pk) = v4_pool_key {
+        //     if is_from_target {
+        //         debug!("   [DEBUG] Extracted V4 PoolKey: Token0={:?}, Token1={:?}, Fee={}, TickSpacing={}, Hooks={:?}", pk.0, pk.1, pk.2, pk.3, pk.4);
+        //     }
+        // }
 
         let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {
             (act, tok)
@@ -153,75 +165,8 @@ pub async fn process_transaction(
                 }
             }
 
-            let mut strategies: Vec<Arc<dyn DexStrategy>> = Vec::new();
-            if let Some(pk) = v4_pool_key {
-                strategies.push(Arc::new(UniswapV4Strategy {
-                    pool_key: pk,
-                    name: "Extracted V4 Key".into(),
-                }));
-            }
-
-            strategies.push(Arc::new(UniswapV3Strategy {
-                router: *UNIV3_ROUTER,
-                quoter: *UNIV3_QUOTER,
-                fee: 10000,
-                name: "UniV3 1%".into(),
-            }));
-            strategies.push(Arc::new(UniswapV3Strategy {
-                router: *UNIV3_ROUTER,
-                quoter: *UNIV3_QUOTER,
-                fee: 3000,
-                name: "UniV3 0.3%".into(),
-            }));
-            strategies.push(Arc::new(UniswapV3Strategy {
-                router: *UNIV3_ROUTER,
-                quoter: *UNIV3_QUOTER,
-                fee: 500,
-                name: "UniV3 0.05%".into(),
-            }));
-            strategies.push(Arc::new(UniswapV3Strategy {
-                router: *PANCAKESWAP_V3_ROUTER,
-                quoter: *PANCAKESWAP_V3_QUOTER,
-                fee: 2500,
-                name: "Pancake V3".into(),
-            }));
-            strategies.push(Arc::new(UniswapV3Strategy {
-                router: *AERO_V3_ROUTER,
-                quoter: *AERO_V3_QUOTER,
-                fee: 100,
-                name: "Aero V3 (Slipstream)".into(),
-            }));
-
-            strategies.push(Arc::new(UniswapV2Strategy {
-                router: *SUSHI_ROUTER,
-                name: "Sushi V2".into(),
-            }));
-            strategies.push(Arc::new(UniswapV2Strategy {
-                router: *BASESWAP_ROUTER,
-                name: "BaseSwap V2".into(),
-            }));
-            strategies.push(Arc::new(UniswapV2Strategy {
-                router: *ALIENBASE_ROUTER,
-                name: "AlienBase V2".into(),
-            }));
-            strategies.push(Arc::new(UniswapV2Strategy {
-                router: *SWAPBASED_ROUTER,
-                name: "SwapBased V2".into(),
-            }));
-            strategies.push(Arc::new(UniswapV2Strategy {
-                router: *ROCKETSWAP_ROUTER,
-                name: "RocketSwap V2".into(),
-            }));
-
-            strategies.push(Arc::new(AerodromeV2Strategy {
-                router: *AERODROME_ROUTER,
-                factory: *AERODROME_FACTORY,
-                path: vec![*WETH_BASE, token_addr],
-                name: "Aero V2 Direct".into(),
-            }));
-            strategies.push(Arc::new(VirtualsStrategy {
-                name: "Virtuals Factory".into(),
-            }));
+            // 使用封装好的函数获取所有策略
+            let strategies = get_all_strategies(token_addr, v4_pool_key);
 
             info!("   [Strategy] Scanning markets for liquidity...");
             let mut debug_errors = Vec::new();
@@ -375,7 +320,7 @@ pub async fn process_transaction(
                         buy_amt,
                         config,
                         lock_manager.clone(),
-                        None
+                        None,
                     ));
                 }
                 Err(e) => {

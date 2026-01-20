@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::Local;
 use ethers::types::{Address, U256};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -10,7 +11,7 @@ pub struct PositionData {
     pub router_address: Address,
     pub initial_cost_eth: U256,
     pub timestamp: u64,
-    pub fee: Option<u32>, // Added for V3 support
+    pub fee: Option<u32>, // Fee Tier, 费率层级，Added for V3 support
 }
 
 pub fn init_storage() {
@@ -26,7 +27,12 @@ pub fn save_position(data: &PositionData) -> Result<()> {
 
 pub fn remove_position(token_address: Address) {
     let filename = format!("positions/{:?}.json", token_address);
-    let _ = fs::remove_file(filename);
+    let archive_dir = "positions/archive";
+    let _ = fs::create_dir_all(archive_dir);
+
+    let timestamp = Local::now().format("%Y%m%d_%H%M%S");
+    let archive_filename = format!("{}/{:?}_{}.json", archive_dir, token_address, timestamp);
+    let _ = fs::rename(filename, archive_filename);
 }
 
 pub fn load_all_positions() -> Vec<PositionData> {

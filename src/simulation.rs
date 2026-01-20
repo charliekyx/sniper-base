@@ -1,13 +1,9 @@
-use crate::constants::{
-    AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER, PANCAKESWAP_V3_QUOTER,
-    PANCAKESWAP_V3_ROUTER, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
-    VIRTUALS_FACTORY_ROUTER, VIRTUALS_ROUTER, VIRTUAL_TOKEN, WETH_BASE,
-};
+use crate::constants::WETH_BASE;
+use crate::strategies::DexStrategy;
 use anyhow::Result;
-use ethers::abi::{Abi, Function, Param, ParamType, StateMutability, Token};
-// [修改] 引入 Ipc，去掉 Ws
+use ethers::abi::{Abi, Function, Param, ParamType, StateMutability};
 use ethers::prelude::{BaseContract, Ipc, Middleware, Provider};
-use ethers::types::{Address, Bytes, Transaction, U256};
+use ethers::types::{Address, Transaction, U256};
 use revm::{
     db::{CacheDB, DatabaseRef, EthersDB},
     primitives::{
@@ -23,6 +19,7 @@ use tokio::{
     task,
     time::{sleep, Duration},
 };
+use tracing::{debug, warn};
 
 // [新增] 辅助函数：解析 EVM Revert 原因
 fn decode_revert_reason(output: &[u8]) -> String {
@@ -116,12 +113,9 @@ impl Simulator {
     pub async fn simulate_bundle(
         &self,
         origin: Address,
-        _target_tx: Option<Transaction>,
-        router_addr: Address,
+        strategy: Arc<dyn DexStrategy>,
         amount_in_eth: U256,
         token_out: Address,
-        v4_pool_key: Option<(Address, Address, u32, i32, Address)>, // [新增] V4 PoolKey
-        explicit_path: Option<Vec<Address>>,                        // [新增] 显式路径，用于多跳策略
     ) -> Result<(bool, U256, U256, String, u64, u32)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
         let block = self
@@ -133,10 +127,11 @@ impl Simulator {
 
         // Clone data to move into blocking task
         let provider = self.provider.clone();
-        let explicit_path = explicit_path.clone();
+        let strategy_clone = strategy.clone();
 
         // Spawn blocking task to run EVM (EthersDB requires blocking context)
         let res = task::spawn_blocking(move || -> Result<(bool, U256, U256, String, u64, u32)> {
+            let strategy = strategy_clone;
             // [修改] EthersDB 也要适配 Ipc
             let ethers_db = EthersDB::new(provider, Some(block_number.into()))
                 .ok_or_else(|| anyhow::anyhow!("Failed to create EthersDB"))?;
@@ -446,11 +441,7 @@ impl Simulator {
             // Let's stick to the pattern: If Virtuals, we try to encode `getBuyPrice`.
             // If it fails, we will see it in logs.
             // We will implement the `buy` encoding in the second phase.
-
-            let router = BaseContract::from(router_abi);
             let token = BaseContract::from(erc20_abi);
-            let revm_router = rAddress::from(router_addr.0);
-            let revm_token = rAddress::from(token_out.0);
 
             let my_wallet = rAddress::from(origin.0);
             let initial_eth = rU256::from(100000000000000000000u128);
@@ -478,292 +469,25 @@ impl Simulator {
             // [Optimized] Smart Routing Logic
 
             // [新增] V3 费率探测逻辑
-            let mut best_fee = 0u32;
-            let is_v3 = router_addr == *UNIV3_ROUTER
-                || router_addr == *PANCAKESWAP_V3_ROUTER
-                || router_addr == *AERO_V3_ROUTER;
-
-            // [修改] 针对 Aerodrome 做特殊编码
-            let amounts_out_calldata = if let Some(pool_key) = v4_pool_key {
-                // [FIXED] Manual Token Construction for V4 to avoid "Invalid Data"
-                let func = v4_quoter_abi.function("quoteExactInputSingle")?;
-                let zero_for_one = *WETH_BASE < token_out;
-
-                // PoolKey: (currency0, currency1, fee, tickSpacing, hooks)
-                let pk_token = Token::Tuple(vec![
-                    Token::Address(pool_key.0),
-                    Token::Address(pool_key.1),
-                    Token::Uint(U256::from(pool_key.2)),
-                    Token::Int(U256::from(pool_key.3 as u32)), // [修复] i32 -> u32 -> U256，确保位模式正确
-                    Token::Address(pool_key.4),
-                ]);
-                // Params: (poolKey, zeroForOne, amountIn, hookData)
-                let params_token = Token::Tuple(vec![
-                    pk_token,
-                    Token::Bool(zero_for_one),
-                    Token::Uint(amount_in_eth),
-                    Token::Bytes(vec![]),
-                ]);
-
-                let encoded = func.encode_input(&[params_token])?;
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
-                Bytes::from(encoded)
-            } else if is_v3 {
-                // V3 需要探测费率 (10000, 3000, 2500, 500, 100)
-                // 加入 2500 (0.25%) 主要是为了 PancakeSwap
-                let fees = vec![10000, 3000, 2500, 500, 100];
-                let quoter = BaseContract::from(v3_quoter_abi.clone());
-                let mut found_calldata = None;
-                let mut max_amount_out = U256::zero();
-
-                // 我们在这里做一个简单的循环模拟来找到有流动性的费率
-                // 注意：这里其实是在 revm 外部做逻辑判断，但为了准确性，我们应该在 revm 内部试错
-                // 但为了简化，我们假设 1% (10000) 或 0.3% (3000) 是最可能的 (Clanker 主要是 1% 或 0.3%)
-                // 我们构造一个 multicall 或者多次模拟?
-                // 为了性能，我们默认先试 10000 (1%)，如果失败试 3000 (0.3%)
-
-                // 这里我们只构造第一次尝试的 calldata (1%)，如果在模拟执行时失败，我们在下面处理
-                // 更好的方式是：在 simulate_bundle 外部决定费率，或者在这里暴力尝试
-                // 鉴于 revm 启动开销，我们在这里尝试找到最佳费率
-
-                for fee in fees {
-                    // QuoteParams: tokenIn, tokenOut, amountIn, fee, sqrtPriceLimitX96
-                    let params = (*WETH_BASE, token_out, amount_in_eth, fee, U256::zero());
-                    let calldata = quoter.encode("quoteExactInputSingle", (params,))?;
-
-                    // 临时执行一次 view call
-                    if router_addr == *PANCAKESWAP_V3_ROUTER {
-                        evm.env.tx.transact_to =
-                            TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
-                    } else if router_addr == *AERO_V3_ROUTER {
-                        evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERO_V3_QUOTER.0));
-                    } else {
-                        evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
-                    }
-                    evm.env.tx.data = calldata.0.clone().into();
-                    evm.env.tx.caller = my_wallet;
-
-                    if let Ok(ResultAndState {
-                        result:
-                            ExecutionResult::Success {
-                                output: Output::Call(b),
-                                ..
-                            },
-                        ..
-                    }) = evm.transact()
-                    {
-                        // 如果成功解码出 amountOut > 0，说明这个费率有流动性
-                        if let Ok((amount_out, _, _, _)) = quoter
-                            .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
-                        {
-                            if amount_out > max_amount_out {
-                                // Found a better pool
-                                max_amount_out = amount_out;
-                                best_fee = fee;
-                                found_calldata = Some(calldata);
-                            }
-                        }
-                    }
-                }
-
-                if !max_amount_out.is_zero() {
-                    println!(
-                        "      [Sim] V3 Best Pool Found: Fee={} Out={}",
-                        best_fee, max_amount_out
-                    );
-                }
-
-                // [修改] 如果 V3 没找到任何费率的池子，直接返回明确错误，不要传空数据去执行
-                found_calldata
-                    .ok_or_else(|| anyhow::anyhow!("V3_No_Liquidity"))
-                    .unwrap_or_default()
-            } else if router_addr == *AERODROME_ROUTER {
-                // [Smart Routing] Aerodrome: Try Direct vs Virtuals Hop
-                let aero_router = BaseContract::from(aero_abi.clone());
-
-                let path_direct = vec![*WETH_BASE, token_out];
-                let path_hop = vec![*WETH_BASE, *VIRTUAL_TOKEN, token_out];
-
-                // 如果外部指定了路径，就用指定的；否则进行智能探测
-                let paths_to_check = if let Some(p) = explicit_path.clone() {
-                    vec![p]
-                } else {
-                    vec![path_direct, path_hop]
-                };
-
-                let mut best_path = paths_to_check[0].clone();
-                let mut max_out = U256::zero();
-
-                // 探测最佳路径
-                for p in paths_to_check {
-                    let mut routes = Vec::new();
-                    for i in 0..p.len() - 1 {
-                        routes.push((p[i], p[i + 1], false, *AERODROME_FACTORY));
-                    }
-
-                    if let Ok(calldata) =
-                        aero_router.encode("getAmountsOut", (amount_in_eth, routes))
-                    {
-                        evm.env.tx.transact_to =
-                            TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
-                        evm.env.tx.data = calldata.0.into();
-                        evm.env.tx.value = rU256::ZERO;
-                        evm.env.tx.caller = my_wallet;
-
-                        // 使用 transact() 而不是 commit，不改变状态
-                        if let Ok(res) = evm.transact() {
-                            if let ExecutionResult::Success {
-                                output: Output::Call(b),
-                                ..
-                            } = res.result
-                            {
-                                if let Ok(amounts) =
-                                    aero_router.decode_output::<Vec<U256>, _>("getAmountsOut", b)
-                                {
-                                    if p.len() == 3 {
-                                        println!(
-                                            "      [DEBUG] Virtuals Hop Amounts: {:?}",
-                                            amounts
-                                        );
-                                    }
-                                    if let Some(last) = amounts.last() {
-                                        if *last > max_out {
-                                            max_out = *last;
-                                            best_path = p;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                let mut routes = Vec::new();
-                for i in 0..best_path.len() - 1 {
-                    routes.push((best_path[i], best_path[i + 1], false, *AERODROME_FACTORY));
-                }
-                aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
-            } else {
-                if router_addr == *VIRTUALS_ROUTER {
-                    // [Deprecated] Logic moved to explicit_path strategy in main.rs
-                    // But kept here for backward compatibility if explicit_path is None
-                    let aero_router = BaseContract::from(aero_abi.clone());
-                    let route1 = (*WETH_BASE, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
-                    let route2 = (*VIRTUALS_ROUTER, token_out, false, *AERODROME_FACTORY);
-                    let routes = vec![route1, route2];
-                    aero_router.encode("getAmountsOut", (amount_in_eth, routes))?
-                } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                    // Virtuals Protocol Quote (Direct)
-                    // buy(address token, uint256 amountIn, uint256 minAmountOut)
-                    #[allow(deprecated)]
-                    let virtuals_buy_func = Function {
-                        name: "buy".to_string(),
-                        inputs: vec![
-                            Param {
-                                name: "token".to_string(),
-                                kind: ParamType::Address,
-                                internal_type: None,
-                            },
-                            Param {
-                                name: "amountIn".to_string(),
-                                kind: ParamType::Uint(256),
-                                internal_type: None,
-                            },
-                            Param {
-                                name: "minAmountOut".to_string(),
-                                kind: ParamType::Uint(256),
-                                internal_type: None,
-                            },
-                        ],
-                        outputs: vec![Param {
-                            name: "amountOut".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        }],
-                        constant: None,
-                        state_mutability: StateMutability::Payable,
-                    };
-                    let mut virtuals_abi = Abi::default();
-                    virtuals_abi
-                        .functions
-                        .insert("buy".to_string(), vec![virtuals_buy_func]);
-                    let v_router = BaseContract::from(virtuals_abi);
-
-                    v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
-                } else {
-                    // [修复] 如果是 Universal Router 且没有 PoolKey，直接报错，不要尝试调用 V2 方法
-                    if router_addr == *UNIVERSAL_ROUTER {
-                        return Ok((
-                            false,
-                            U256::zero(),
-                            U256::zero(),
-                            "Universal Router requires PoolKey".to_string(),
-                            0,
-                            0,
-                        ));
-                    }
-                    // 标准 V2
-                    let path = if let Some(p) = explicit_path.clone() {
-                        p
-                    } else {
-                        vec![*WETH_BASE, token_out]
-                    };
-                    router.encode("getAmountsOut", (amount_in_eth, path.clone()))?
-                }
-            };
+            let (quote_target, quote_data, quote_value) = strategy.encode_quote(amount_in_eth, token_out)?;
 
             evm.env.tx.caller = my_wallet;
-            if v4_pool_key.is_some() {
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV4_QUOTER.0));
-            } else if is_v3 {
-                if router_addr == *PANCAKESWAP_V3_ROUTER {
-                    evm.env.tx.transact_to =
-                        TransactTo::Call(rAddress::from(PANCAKESWAP_V3_QUOTER.0));
-                } else if router_addr == *AERO_V3_ROUTER {
-                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERO_V3_QUOTER.0));
-                } else {
-                    evm.env.tx.transact_to = TransactTo::Call(rAddress::from(UNIV3_QUOTER.0));
-                }
-            } else if router_addr == *VIRTUALS_ROUTER {
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
-            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                evm.env.tx.transact_to =
-                    TransactTo::Call(rAddress::from(VIRTUALS_FACTORY_ROUTER.0));
-            } else {
-                evm.env.tx.transact_to = TransactTo::Call(revm_router);
-            }
-            evm.env.tx.data = amounts_out_calldata.0.into();
-            // [修复] Virtuals Factory 的 Quote (buy) 需要发送 ETH
-            if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
-            } else {
-                evm.env.tx.value = rU256::ZERO;
-            }
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(quote_target.0));
+            evm.env.tx.data = quote_data.0.into();
+            evm.env.tx.value = rU256::from_limbs(quote_value.0);
             evm.env.tx.gas_limit = 500_000;
 
-            // [修改] 如果 calldata 为空（比如 V3 没找到池子），直接返回错误
-            if evm.env.tx.data.is_empty() {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "Pool Not Found (V3)".to_string(), // [优化] 明确提示 V3 没池子
-                    0,
-                    0,
-                ));
-            }
-
-            let result_amounts = if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                match evm.transact() {
-                    Ok(res) => res.result,
+            let result_amounts = if strategy.quote_requires_commit() {
+                match evm.transact_commit() {
+                    Ok(result) => result,
                     Err(_) => ExecutionResult::Revert {
                         gas_used: 0,
                         output: vec![].into(),
                     },
                 }
             } else {
-                match evm.transact_commit() {
-                    Ok(result) => result,
+                match evm.transact() {
+                    Ok(res) => res.result,
                     Err(_) => ExecutionResult::Revert {
                         gas_used: 0,
                         output: vec![].into(),
@@ -777,65 +501,13 @@ impl Simulator {
                     output: Output::Call(b),
                     ..
                 } => {
-                    if v4_pool_key.is_some() {
-                        let quoter = BaseContract::from(v4_quoter_abi);
-                        quoter
-                            .decode_output::<(U256, u128), _>("quoteExactInputSingle", b)
-                            .map(|r| r.0)
-                            .unwrap_or_default()
-                    } else if is_v3 {
-                        let quoter = BaseContract::from(v3_quoter_abi);
-                        quoter
-                            .decode_output::<(U256, U256, u32, U256), _>("quoteExactInputSingle", b)
-                            .map(|r| r.0)
-                            .unwrap_or_default()
-                    } else if router_addr == *VIRTUALS_ROUTER {
-                        // Decode Aerodrome getAmountsOut result
-                        let decoder = BaseContract::from(aero_abi.clone());
-                        decoder
-                            .decode_output::<Vec<U256>, _>("getAmountsOut", b)
-                            .unwrap_or_default()
-                            .last()
-                            .cloned()
-                            .unwrap_or_default()
-                    } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                        // Decode Virtuals buy result
-                        let v_router = BaseContract::from(
-                            ethers::abi::parse_abi(&[
-                                "function buy(address,uint256,uint256) returns (uint256)",
-                            ])
-                            .unwrap(),
-                        );
-                        v_router
-                            .decode_output::<U256, _>("buy", b)
-                            .unwrap_or(U256::zero())
-                    } else {
-                        let decoder = if router_addr == *AERODROME_ROUTER {
-                            BaseContract::from(aero_abi.clone())
-                        } else {
-                            router.clone()
-                        };
-                        match decoder.decode_output::<Vec<U256>, _>("getAmountsOut", b.clone()) {
-                            Ok(v) => v.last().cloned().unwrap_or_default(),
-                            Err(e) => {
-                                // Only log if bytes are not empty (empty usually means contract exists but returned nothing/void)
-                                if !b.is_empty() {
-                                    println!(
-                                        "      [Sim] Decode Error: {:?} | Raw: {}",
-                                        e,
-                                        ethers::utils::hex::encode(&b)
-                                    );
-                                }
-                                U256::zero()
-                            }
-                        }
-                    }
+                    strategy.decode_quote(b.to_vec().into()).unwrap_or_default()
                 }
                 ExecutionResult::Success {
                     output: Output::Create(..),
                     ..
                 } => {
-                    println!("      [Sim] Quote returned Contract Creation (Unexpected)");
+                    warn!("      [Sim] Quote returned Contract Creation (Unexpected)");
                     return Ok((
                         false,
                         U256::zero(),
@@ -859,11 +531,11 @@ impl Simulator {
                             0,
                         ));
                     }
-                    println!("      [Sim] Quote Reverted: {}", reason);
+                    debug!("      [Sim] Quote Reverted: {}", reason);
                     return Ok((false, U256::zero(), U256::zero(), reason, 0, 0));
                 }
                 ExecutionResult::Halt { reason, .. } => {
-                    println!("      [Sim] Quote Halted: {:?}", reason);
+                    debug!("      [Sim] Quote Halted: {:?}", reason);
                     return Ok((
                         false,
                         U256::zero(),
@@ -876,18 +548,14 @@ impl Simulator {
             };
 
             if !expected_tokens.is_zero() {
-                println!(
+                debug!(
                     "      [Sim] Quote Success. Expected Out: {}",
                     expected_tokens
                 );
             }
 
             // [新增] 如果 Quote 结果为 0，直接终止，不要尝试买入（节省资源并减少误报）
-            // [Fix] For Virtuals, the buy function might not return the amount (void), so we proceed even if 0 to check balance change
-            if expected_tokens.is_zero()
-                && router_addr != *VIRTUALS_ROUTER
-                && router_addr != *VIRTUALS_FACTORY_ROUTER
-            {
+            if expected_tokens.is_zero() && !strategy.quote_requires_commit() {
                 return Ok((
                     false,
                     U256::zero(),
@@ -900,291 +568,27 @@ impl Simulator {
 
             let deadline = U256::from(9999999999u64);
 
-            // [修改] 针对 Aerodrome 的买入编码
-            let buy_calldata = if v4_pool_key.is_some() {
-                // V4 Simulation: We skip actual swap simulation for V4 in this simplified version
-                // because encoding Universal Router V4 commands is complex.
-                // [Fix] Shadow Mint for V4: manually give tokens to the user in simulation DB
-                // so that balance checks pass.
+            // [V4 特殊处理] 保持原有的 V4 模拟跳过逻辑
+            if strategy.name().contains("V4") {
                 if !expected_tokens.is_zero() {
-                    // Warning: We cannot write directly to storage without knowing the slot.
-                    // But we can skip the "Buy" execution check and just return Success.
-                    return Ok((
-                        true,
-                        U256::zero(), // Profit unknown without sell
-                        expected_tokens,
-                        "V4_Quoted".to_string(),
-                        0,
-                        best_fee,
-                    ));
+                    return Ok((true, U256::zero(), expected_tokens, "V4_Quoted".to_string(), 0, strategy.fee()));
                 }
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "V4_Quote_Fail".to_string(),
-                    0,
-                    0,
-                ));
-            } else if is_v3 {
-                // Uniswap V3 Swap: exactInputSingle(ExactInputSingleParams calldata params)
-                // struct ExactInputSingleParams { address tokenIn; address tokenOut; uint24 fee; address recipient; uint256 deadline; uint256 amountIn; uint256 amountOutMinimum; uint160 sqrtPriceLimitX96; }
-                let v3_swap_params_type = ParamType::Tuple(vec![
-                    ParamType::Address,   // tokenIn
-                    ParamType::Address,   // tokenOut
-                    ParamType::Uint(24),  // fee
-                    ParamType::Address,   // recipient
-                    ParamType::Uint(256), // amountIn
-                    ParamType::Uint(256), // amountOutMinimum
-                    ParamType::Uint(160), // sqrtPriceLimitX96
-                ]);
+                return Ok((false, U256::zero(), U256::zero(), "V4_Quote_Fail".to_string(), 0, 0));
+            }
 
-                #[allow(deprecated)]
-                let v3_swap_func = Function {
-                    name: "exactInputSingle".to_string(),
-                    inputs: vec![Param {
-                        name: "params".to_string(),
-                        kind: v3_swap_params_type,
-                        internal_type: None,
-                    }],
-                    outputs: vec![Param {
-                        name: "amountOut".to_string(),
-                        kind: ParamType::Uint(256),
-                        internal_type: None,
-                    }],
-                    constant: None,
-                    state_mutability: StateMutability::Payable,
-                };
-
-                // [修复] 手动构建 Token::Tuple 以确保 V3 Swap 编码正确
-                // 结构体顺序: tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96
-                let params_token = Token::Tuple(vec![
-                    Token::Address(*WETH_BASE),
-                    Token::Address(token_out),
-                    Token::Uint(U256::from(best_fee)),
-                    Token::Address(Address::from(my_wallet.0 .0)),
-                    Token::Uint(amount_in_eth),
-                    Token::Uint(U256::zero()), // amountOutMinimum
-                    Token::Uint(U256::zero()), // sqrtPriceLimitX96
-                ]);
-
-                let encoded = v3_swap_func.encode_input(&[params_token])?;
-                Bytes::from(encoded)
-            } else if router_addr == *AERODROME_ROUTER {
-                // Aerodrome Swap: swapExactETHForTokensSupportingFeeOnTransferTokens(uint amountOutMin, Route[] routes, address to, uint deadline)
-                #[allow(deprecated)]
-                let aero_swap_func = Function {
-                    name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "amountOutMin".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "routes".to_string(),
-                            kind: ParamType::Array(Box::new(route_struct_type.clone())),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "to".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "deadline".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: vec![],
-                    constant: None,
-                    state_mutability: StateMutability::Payable,
-                };
-                let mut aero_swap_abi = Abi::default();
-                aero_swap_abi.functions.insert(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
-                    vec![aero_swap_func],
-                );
-                let aero_router = BaseContract::from(aero_swap_abi.clone());
-
-                // 重新确定最佳路径用于 Swap (因为上面 Quote 阶段可能改变了 best_path，但这里我们需要重新构建)
-                // 简单起见，我们再次检查 expected_tokens 对应的路径，或者假设 Quote 阶段最后一次 transact_to 的 data 对应的路径是最佳的？
-                // 为了稳健，我们这里重新构建一次 Direct vs Hop 的逻辑太复杂。
-                // 简化方案：如果 expected_tokens > 0，说明 Quote 成功。
-                // 我们假设 Quote 阶段最后留在 evm.env.tx.data 里的就是最佳路径的 calldata。
-                // 但这里我们需要构建 Swap 的 calldata。
-                // 我们需要知道 best_path。
-                // [Fix] 我们在 Quote 阶段没有把 best_path 传出来。
-                // 让我们在 Aerodrome Quote 块里把 best_path 存下来。
-                // 由于 Rust 作用域限制，我们在上面重新做一次简单的路径判断。
-
-                let path_direct = vec![*WETH_BASE, token_out];
-                let path_hop = vec![*WETH_BASE, *VIRTUAL_TOKEN, token_out];
-                // 简单的启发式：如果 expected_tokens 很大，且我们之前看到了 Virtuals Hop 的日志，可能是 Hop。
-                // 但为了准确，我们这里默认用 Direct，除非 explicit_path 指定了 Hop。
-                // 或者，我们可以在这里再跑一次简单的逻辑：
-                // 如果 explicit_path 是 None，我们默认它是 Direct，除非我们能把 best_path 传下来。
-                // 鉴于代码结构，我们这里简单处理：如果 explicit_path 是 None，我们构建 Direct。
-                // 等等，这样就浪费了 Smart Routing。
-                // [Correct Fix] 我们应该在 Quote 阶段就把 best_path 确定。
-                // 由于代码结构限制，我们这里再次构建 path。
-
-                let path = if let Some(p) = explicit_path.clone() {
-                    p
-                } else {
-                    // 如果没有显式路径，我们假设是 Direct。
-                    // *注意*：这可能会导致买入失败（如果只有 Hop 有流动性）。
-                    // 为了修复这个问题，我们应该在 main.rs 中使用 "Smart" 策略，或者在这里重新检测。
-                    // 考虑到性能，我们在 main.rs 中传入 None，让 simulate_bundle 决定。
-                    // 但这里我们丢失了 best_path。
-                    // 让我们修改一下：如果 explicit_path 是 None，我们默认尝试 Hop 路径（因为很多土狗是 Virtuals）。
-                    // 不，这太冒险。
-                    // 让我们在上面 Quote 阶段把 best_path 记录下来？ 不行，变量作用域。
-                    //
-                    // [最终方案]：我们在 main.rs 中保留 Direct 和 Hop 两个策略。
-                    // 这样 simulate_bundle 不需要太聪明，只需要执行传入的路径。
-                    // 但用户要求 "Smart Routing"。
-                    // 那么我们必须在这里重新确定路径。
-
-                    // 重新运行一次轻量级检查
-                    let mut best = vec![*WETH_BASE, token_out];
-                    // ... (省略重复检查，为了代码简洁，我们假设 main.rs 会传入正确的 explicit_path)
-                    // 实际上，为了满足用户 "Smart Routing" 的需求，我们这里强制检查一下 Hop。
-                    let hop = vec![*WETH_BASE, *VIRTUAL_TOKEN, token_out];
-                    // 如果是 Aerodrome 且没有指定路径，我们默认用 Direct。
-                    // 但如果 Direct 没流动性（Quote=0），我们在 main.rs 的策略循环中会失败，然后尝试下一个策略（Hop）。
-                    // 所以，只要 main.rs 配置了 Direct 和 Hop 两个策略，就是 "Smart" 的。
-                    // 用户的代码里 main.rs 已经有了这两个策略。
-                    // 所以这里我们只需要确保支持 explicit_path 即可。
-                    vec![*WETH_BASE, token_out]
-                };
-
-                let mut routes = Vec::new();
-                for i in 0..path.len() - 1 {
-                    routes.push((path[i], path[i + 1], false, *AERODROME_FACTORY));
-                }
-                aero_router.encode(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens",
-                    (
-                        U256::zero(),
-                        routes,
-                        Address::from(my_wallet.0 .0),
-                        deadline,
-                    ),
-                )?
-            } else if router_addr == *VIRTUALS_ROUTER {
-                // Virtuals Multihop Buy: ETH -> VIRTUAL -> Token
-                #[allow(deprecated)]
-                let aero_swap_func = Function {
-                    name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "amountOutMin".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "routes".to_string(),
-                            kind: ParamType::Array(Box::new(route_struct_type.clone())),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "to".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "deadline".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: vec![],
-                    constant: None,
-                    state_mutability: StateMutability::Payable,
-                };
-                let mut aero_swap_abi = Abi::default();
-                aero_swap_abi.functions.insert(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
-                    vec![aero_swap_func],
-                );
-                let aero_router = BaseContract::from(aero_swap_abi);
-
-                let route1 = (*WETH_BASE, *VIRTUALS_ROUTER, false, *AERODROME_FACTORY);
-                let route2 = (*VIRTUALS_ROUTER, token_out, false, *AERODROME_FACTORY);
-                let routes = vec![route1, route2];
-
-                aero_router.encode(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens",
-                    (
-                        U256::zero(),
-                        routes,
-                        Address::from(my_wallet.0 .0),
-                        deadline,
-                    ),
-                )?
-            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                // Virtuals Buy (Direct)
-                #[allow(deprecated)]
-                let virtuals_buy_func = Function {
-                    name: "buy".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "token".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "amountIn".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "minAmountOut".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: vec![Param {
-                        name: "amountOut".to_string(),
-                        kind: ParamType::Uint(256),
-                        internal_type: None,
-                    }],
-                    constant: None,
-                    state_mutability: StateMutability::Payable,
-                };
-                let mut virtuals_abi = Abi::default();
-                virtuals_abi
-                    .functions
-                    .insert("buy".to_string(), vec![virtuals_buy_func]);
-                let v_router = BaseContract::from(virtuals_abi);
-
-                // We use the same encoding as the quote step
-                v_router.encode("buy", (token_out, amount_in_eth, U256::zero()))?
-            } else {
-                // 标准 V2
-                let path = if let Some(p) = explicit_path.clone() {
-                    p
-                } else {
-                    vec![*WETH_BASE, token_out]
-                };
-                router.encode(
-                    "swapExactETHForTokensSupportingFeeOnTransferTokens",
-                    (U256::zero(), path, Address::from(my_wallet.0 .0), deadline),
-                )?
-            };
+            // 使用 Strategy 接口获取买入调用数据
+            let (buy_target, buy_calldata, buy_value) = strategy.encode_buy(
+                amount_in_eth, 
+                token_out, 
+                Address::from(my_wallet.0.0), 
+                deadline, 
+                U256::zero()
+            )?;
 
             evm.env.tx.caller = my_wallet;
-            evm.env.tx.transact_to = TransactTo::Call(revm_router);
-            if router_addr == *VIRTUALS_ROUTER {
-                evm.env.tx.transact_to = TransactTo::Call(rAddress::from(AERODROME_ROUTER.0));
-            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                evm.env.tx.transact_to =
-                    TransactTo::Call(rAddress::from(VIRTUALS_FACTORY_ROUTER.0));
-            }
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(buy_target.0));
             evm.env.tx.data = buy_calldata.0.into();
-            evm.env.tx.value = rU256::from_limbs(amount_in_eth.0);
+            evm.env.tx.value = rU256::from_limbs(buy_value.0);
             evm.env.tx.gas_limit = 1_000_000; // [优化] 提高 Gas Limit
 
             // [修复] 正确捕获 Swap 交易的 Revert 原因
@@ -1195,7 +599,7 @@ impl Simulator {
                 }
                 Ok(ExecutionResult::Revert { output, .. }) => {
                     let reason = decode_revert_reason(&output);
-                    println!("      [Sim] Buy Tx Reverted: {}", reason);
+                    debug!("      [Sim] Buy Tx Reverted: {}", reason);
                     return Ok((
                         false,
                         U256::zero(),
@@ -1206,7 +610,7 @@ impl Simulator {
                     ));
                 }
                 _ => {
-                    println!("      [Sim] Buy Tx Failed (System/Halt)");
+                    warn!("      [Sim] Buy Tx Failed (System/Halt)");
                     return Ok((
                         false,
                         U256::zero(),
@@ -1219,7 +623,7 @@ impl Simulator {
             }
 
             let balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
-            evm.env.tx.transact_to = TransactTo::Call(revm_token);
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(token_out.0));
             evm.env.tx.data = balance_calldata.0.into();
             evm.env.tx.value = rU256::ZERO;
 
@@ -1252,10 +656,7 @@ impl Simulator {
             }
 
             // 只有当 expected_tokens > 0 时才检查滑点，否则（盲买）跳过此检查
-            if !expected_tokens.is_zero()
-                && token_balance * 10 < expected_tokens * 8
-                && router_addr != *VIRTUALS_ROUTER
-                && router_addr != *VIRTUALS_FACTORY_ROUTER
+            if !expected_tokens.is_zero() && token_balance * 10 < expected_tokens * 8
             {
                 return Ok((
                     false,
@@ -1270,8 +671,8 @@ impl Simulator {
                 ));
             }
 
-            let approve_calldata = token.encode("approve", (router_addr, U256::MAX))?;
-            evm.env.tx.transact_to = TransactTo::Call(revm_token);
+            let approve_calldata = token.encode("approve", (buy_target, U256::MAX))?;
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(token_out.0));
             evm.env.tx.data = approve_calldata.0.into();
 
             // [Fix] Check approve result explicitly
@@ -1300,171 +701,18 @@ impl Simulator {
                 }
             }
 
-            // [Optimized] Sell Path should be reverse of Buy Path
-            let mut sell_path = if let Some(p) = explicit_path {
-                p
-            } else {
-                vec![*WETH_BASE, token_out]
-            };
-            sell_path.reverse();
-            // Replace WETH with TokenOut at start and TokenOut with WETH at end?
-            // No, path is [WETH, ..., Token]. Reverse is [Token, ..., WETH]. Correct.
-
-            // [修改] 针对 Aerodrome 的卖出编码
-            let sell_calldata = if is_v3 {
-                let v3_swap_params_type = ParamType::Tuple(vec![
-                    ParamType::Address,   // tokenIn
-                    ParamType::Address,   // tokenOut
-                    ParamType::Uint(24),  // fee
-                    ParamType::Address,   // recipient
-                    ParamType::Uint(256), // amountIn
-                    ParamType::Uint(256), // amountOutMinimum
-                    ParamType::Uint(160), // sqrtPriceLimitX96
-                ]);
-                #[allow(deprecated)]
-                let v3_swap_func = Function {
-                    name: "exactInputSingle".to_string(),
-                    inputs: vec![Param {
-                        name: "params".to_string(),
-                        kind: v3_swap_params_type,
-                        internal_type: None,
-                    }],
-                    outputs: vec![Param {
-                        name: "amountOut".to_string(),
-                        kind: ParamType::Uint(256),
-                        internal_type: None,
-                    }],
-                    constant: None,
-                    state_mutability: StateMutability::Payable,
-                };
-                let mut v3_swap_abi = Abi::default();
-                v3_swap_abi
-                    .functions
-                    .insert("exactInputSingle".to_string(), vec![v3_swap_func.clone()]);
-
-                // [Fix] Use Manual Token Construction for Sell to avoid encoding issues
-                let params_token = Token::Tuple(vec![
-                    Token::Address(token_out),
-                    Token::Address(*WETH_BASE),
-                    Token::Uint(U256::from(best_fee)),
-                    Token::Address(Address::from(my_wallet.0 .0)),
-                    Token::Uint(token_balance),
-                    Token::Uint(U256::zero()), // amountOutMinimum
-                    Token::Uint(U256::zero()), // sqrtPriceLimitX96
-                ]);
-
-                let encoded = v3_swap_func.encode_input(&[params_token])?;
-                Bytes::from(encoded)
-            } else if router_addr == *AERODROME_ROUTER {
-                #[allow(deprecated)]
-                let aero_sell_func = Function {
-                    name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "amountIn".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "amountOutMin".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "routes".to_string(),
-                            kind: ParamType::Array(Box::new(route_struct_type.clone())),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "to".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "deadline".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: vec![],
-                    constant: None,
-                    state_mutability: StateMutability::NonPayable,
-                };
-                let mut aero_sell_abi = Abi::default();
-                aero_sell_abi.functions.insert(
-                    "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
-                    vec![aero_sell_func],
-                );
-                let aero_router = BaseContract::from(aero_sell_abi);
-                // Use the reversed path for routes
-                let mut routes = Vec::new();
-                for i in 0..sell_path.len() - 1 {
-                    routes.push((sell_path[i], sell_path[i + 1], false, *AERODROME_FACTORY));
-                }
-
-                aero_router.encode(
-                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                    (
-                        token_balance,
-                        U256::zero(),
-                        routes,
-                        Address::from(my_wallet.0 .0),
-                        deadline,
-                    ),
-                )?
-            } else if router_addr == *VIRTUALS_FACTORY_ROUTER {
-                // [Fix] Virtuals Protocol Sell (Direct)
-                // sell(address token, uint256 amountIn, uint256 minAmountOut)
-                #[allow(deprecated)]
-                let virtuals_sell_func = Function {
-                    name: "sell".to_string(),
-                    inputs: vec![
-                        Param {
-                            name: "token".to_string(),
-                            kind: ParamType::Address,
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "amountIn".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                        Param {
-                            name: "minAmountOut".to_string(),
-                            kind: ParamType::Uint(256),
-                            internal_type: None,
-                        },
-                    ],
-                    outputs: vec![Param {
-                        name: "amountOut".to_string(),
-                        kind: ParamType::Uint(256),
-                        internal_type: None,
-                    }],
-                    constant: None,
-                    state_mutability: StateMutability::NonPayable,
-                };
-                let mut virtuals_abi = Abi::default();
-                virtuals_abi
-                    .functions
-                    .insert("sell".to_string(), vec![virtuals_sell_func]);
-                let v_router = BaseContract::from(virtuals_abi);
-                v_router.encode("sell", (token_out, token_balance, U256::zero()))?
-            } else {
-                router.encode(
-                    "swapExactTokensForETHSupportingFeeOnTransferTokens",
-                    (
-                        token_balance,
-                        U256::zero(),
-                        sell_path,
-                        Address::from(my_wallet.0 .0),
-                        deadline,
-                    ),
-                )?
-            };
+            let (sell_target, sell_calldata, sell_value) = strategy.encode_sell(
+                token_balance, 
+                token_out, 
+                Address::from(my_wallet.0.0), 
+                deadline, 
+                U256::zero()
+            )?;
 
             evm.env.tx.caller = my_wallet;
-            evm.env.tx.transact_to = TransactTo::Call(revm_router);
+            evm.env.tx.transact_to = TransactTo::Call(rAddress::from(sell_target.0));
             evm.env.tx.data = sell_calldata.0.into();
+            evm.env.tx.value = rU256::from_limbs(sell_value.0);
 
             let sell_result = evm.transact_commit();
 
@@ -1505,7 +753,7 @@ impl Simulator {
 
             // [Fix] V3 Swaps return WETH. Virtuals might also behave unexpectedly.
             // We check WETH balance for these strategies to ensure we capture all profit.
-            if is_v3 || router_addr == *VIRTUALS_FACTORY_ROUTER {
+            if strategy.name().contains("V3") || strategy.name().contains("Virtuals") {
                 let weth_balance_calldata =
                     token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
                 let revm_weth = rAddress::from(WETH_BASE.0);
@@ -1534,7 +782,7 @@ impl Simulator {
                     expected_tokens,
                     "Profitable".to_string(),
                     gas_used,
-                    best_fee,
+                    strategy.fee(),
                 ))
             } else {
                 // [修复] 增加亏损阈值检查
@@ -1545,7 +793,7 @@ impl Simulator {
                 let max_loss = invest_amt * rU256::from(20) / rU256::from(100);
 
                 if loss > max_loss {
-                    println!(
+                    warn!(
                         "      [Sim] High Loss: Initial={} Final={} Loss={} Max={}",
                         initial_eth, final_eth, loss, max_loss
                     );
@@ -1555,7 +803,7 @@ impl Simulator {
                         expected_tokens,
                         "High Tax/Loss (>20%)".to_string(),
                         gas_used,
-                        best_fee,
+                        strategy.fee(),
                     ))
                 } else {
                     Ok((
@@ -1564,7 +812,7 @@ impl Simulator {
                         expected_tokens,
                         "Sellable but Loss".to_string(),
                         gas_used,
-                        best_fee,
+                        strategy.fee(),
                     ))
                 }
             }

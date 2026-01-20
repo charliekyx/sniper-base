@@ -3,6 +3,7 @@ use serde::Serialize;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
+use tracing::{error, info};
 
 #[derive(Debug, Serialize)]
 pub struct ShadowRecord {
@@ -29,7 +30,7 @@ pub fn log_to_file(msg: String) {
 
 pub fn log_shadow_trade(record: ShadowRecord) {
     // Print to console for real-time monitoring
-    println!(
+    info!(
         "[SHADOW] {} | {} | {} | Res: {}",
         record.timestamp, record.event_type, record.token_address, record.simulation_result
     );
@@ -52,15 +53,15 @@ pub fn log_shadow_trade(record: ShadowRecord) {
                 .from_writer(f);
 
             if let Err(e) = wtr.serialize(&record) {
-                eprintln!("[LOGGER ERROR] Failed to serialize record: {:?}", e);
+                error!("[LOGGER ERROR] Failed to serialize record: {:?}", e);
             }
 
             if let Err(e) = wtr.flush() {
-                eprintln!("[LOGGER ERROR] Failed to flush CSV writer: {:?}", e);
+                error!("[LOGGER ERROR] Failed to flush CSV writer: {:?}", e);
             }
         }
         Err(e) => {
-            eprintln!("[LOGGER ERROR] Failed to open shadow_trades.csv: {:?}", e);
+            error!("[LOGGER ERROR] Failed to open shadow_trades.csv: {:?}", e);
         }
     }
 }
@@ -75,7 +76,7 @@ pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, st
         0.0
     };
 
-    println!(
+    info!(
         "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Strategy: {}",
         token, profit, roi, strategy
     );

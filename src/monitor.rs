@@ -140,6 +140,16 @@ pub async fn monitor_position(
                     ethers::utils::format_units(current_val, "ether").unwrap(),
                     sell_reason.clone(),
                 );
+
+                // let email_body = format!(
+                //     "Event: Shadow Sell Triggered\nToken: {:?}\nInitial Cost: {} ETH\nFinal Value: {} ETH\nReason: {}",
+                //     token_addr,
+                //     ethers::utils::format_units(initial_cost_eth, "ether").unwrap(),
+                //     ethers::utils::format_units(current_val, "ether").unwrap(),
+                //     sell_reason
+                // );
+                // crate::email::send_email_alert("Sniper: Shadow Sell", &email_body);
+
                 if sell_reason == "2x_Profit_Half" {
                     shadow_balance = shadow_balance - sell_amount;
                 } else {
@@ -158,6 +168,13 @@ pub async fn monitor_position(
                     strategy.pool_key(),
                 )
                 .await;
+
+                let email_body = format!(
+                    "Event: Live Sell Executed\nToken: {:?}\nAmount: {:?}\nReason: {}\nCurrent Value: {} ETH",
+                    token_addr, sell_amount, sell_reason, ethers::utils::format_units(current_val, "ether").unwrap()
+                );
+                crate::email::send_email_alert("Sniper: LIVE SELL", &email_body);
+
                 lock_manager.unlock(token_addr);
             }
             if !sold_half || is_panic {

@@ -24,6 +24,8 @@ pub struct AppConfig {
     pub sell_strategy_2x_exit_half: bool,
     pub sell_strategy_3x_exit_all: bool,
     pub anti_rug_dip_threshold: u64,
+    pub slippage_pct: u64,
+    pub weekly_usdc_limit: f64,
 }
 
 impl AppConfig {
@@ -80,6 +82,8 @@ impl AppConfig {
             sell_strategy_2x_exit_half: get_bool("SELL_STRATEGY_2X_EXIT_HALF"),
             sell_strategy_3x_exit_all: get_bool("SELL_STRATEGY_3X_EXIT_ALL"),
             anti_rug_dip_threshold: get_u64("ANTI_RUG_DIP_THRESHOLD", 50),
+            slippage_pct: get_u64("SLIPPAGE_PCT", 20),
+            weekly_usdc_limit: get_f64("WEEKLY_USDC_LIMIT", 50.0),
         }
     }
 

@@ -1,7 +1,7 @@
 use crate::constants::{
     AERODROME_FACTORY, AERODROME_ROUTER, AERO_V3_QUOTER, AERO_V3_ROUTER, CLANKER_HOOK_DYNAMIC,
     CLANKER_HOOK_STATIC, UNIV3_QUOTER, UNIV3_ROUTER, UNIV4_QUOTER, UNIVERSAL_ROUTER,
-    VIRTUALS_ROUTER, VIRTUAL_TOKEN, WETH_BASE,
+    VIRTUALS_ROUTER, WETH_BASE,
 };
 use crate::simulation::Simulator;
 use crate::strategies::*;
@@ -56,7 +56,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         let sim_res = simulator
-            .simulate_bundle(origin, strategy, amount_in, test_token)
+            .simulate_bundle(origin, strategy, amount_in, test_token, 20)
             .await;
 
         match sim_res {
@@ -89,7 +89,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         let sim_res = simulator
-            .simulate_bundle(origin, strategy, amount_in, usdc)
+            .simulate_bundle(origin, strategy, amount_in, usdc, 20)
             .await;
 
         match sim_res {
@@ -120,7 +120,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         let sim_res = simulator
-            .simulate_bundle(origin, strategy, amount_in, usdc)
+            .simulate_bundle(origin, strategy, amount_in, usdc, 20)
             .await;
 
         match sim_res {
@@ -151,7 +151,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         let sim_res = simulator
-            .simulate_bundle(origin, strategy, amount_in, random_token)
+            .simulate_bundle(origin, strategy, amount_in, random_token, 20)
             .await;
 
         match sim_res {
@@ -184,7 +184,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         let sim_res = simulator
-            .simulate_bundle(origin, strategy, amount_in, usdc)
+            .simulate_bundle(origin, strategy, amount_in, usdc, 20)
             .await;
 
         match sim_res {
@@ -217,7 +217,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         });
 
         match simulator
-            .simulate_bundle(owner, strategy, amount, token_addr)
+            .simulate_bundle(owner, strategy, amount, token_addr, 20)
             .await
         {
             Ok((success, profit, tokens, reason, gas, _)) => {

@@ -14,7 +14,6 @@ use revm::{
     Database, EVM,
 };
 use std::cell::RefCell;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::{
     task,
@@ -81,6 +80,7 @@ impl Simulator {
         strategy: Arc<dyn DexStrategy>,
         amount_in_eth: U256,
         token_out: Address,
+        slippage_pct: u64,
     ) -> Result<(bool, U256, U256, String, u64, u32)> {
         let block_number = self.provider.get_block_number().await?.as_u64();
         let block = self
@@ -315,7 +315,7 @@ impl Simulator {
 
             // 合并余额与税率检查
             if !expected_tokens.is_zero() {
-                if token_balance * 10 < expected_tokens * 8 {
+                if token_balance * 100 < expected_tokens * (100 - slippage_pct) {
                     let reason = if token_balance.is_zero() {
                         "Zero Tokens (No Liquidity/Honeypot)".to_string()
                     } else {
@@ -455,8 +455,8 @@ impl Simulator {
                 // 计算亏损金额
                 let loss = initial_eth - final_eth;
                 let invest_amt = rU256::from_limbs(amount_in_eth.0);
-                // 亏损阈值：20% (考虑到滑点和Gas，太低会误杀)
-                let max_loss = invest_amt * rU256::from(20) / rU256::from(100);
+                // 亏损阈值：动态配置 (考虑到滑点和Gas)
+                let max_loss = invest_amt * rU256::from(slippage_pct) / rU256::from(100);
 
                 if loss > max_loss {
                     warn!(

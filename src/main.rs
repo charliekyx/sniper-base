@@ -3,6 +3,7 @@ mod config;
 mod constants;
 mod decoder;
 mod diagnostics;
+mod email;
 mod lock_manager;
 mod logger;
 mod monitor;
@@ -12,6 +13,7 @@ mod processor;
 mod sell;
 mod simulation;
 mod strategies;
+mod spend_limit;
 
 use config::AppConfig;
 use diagnostics::run_self_check;
@@ -21,6 +23,7 @@ use nonce::NonceManager;
 use position_dao::{init_storage, load_all_positions};
 use processor::process_transaction;
 use simulation::Simulator;
+use spend_limit::SpendLimitManager;
 use strategies::get_strategy_for_position;
 
 use dotenv::dotenv;
@@ -64,6 +67,8 @@ async fn main() -> anyhow::Result<()> {
     let simulator = Simulator::new(provider_arc.clone());
     // 初始化重复购买锁（必须在恢复持仓和启动监控之前）
     let lock_manager = LockManager::new();
+
+    let spend_manager = Arc::new(SpendLimitManager::new("spend_history.json"));
 
     info!("Base Sniper Started");
     info!(
@@ -132,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
     let s_clone = simulator.clone();
     let n_clone = nonce_manager.clone();
     let l_clone = lock_manager.clone();
+    let sm_clone = spend_manager.clone();
 
     task::spawn(async move {
         while let Some(tx) = rx_receiver.recv().await {
@@ -142,8 +148,9 @@ async fn main() -> anyhow::Result<()> {
             let s = s_clone.clone();
             let n = n_clone.clone();
             let l = l_clone.clone();
+            let sm = sm_clone.clone();
             task::spawn(async move {
-                process_transaction(tx, p, c, n, s, cfg, t, l).await;
+                process_transaction(tx, p, c, n, s, cfg, t, l, sm).await;
             });
         }
     });

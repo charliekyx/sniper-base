@@ -1,12 +1,13 @@
 use crate::buy::execute_buy_and_approve;
 use crate::config::AppConfig;
-use crate::constants::{get_router_name, WETH_BASE};
+use crate::constants::{get_router_name, WETH_BASE, USDC_BASE, UNIV3_ROUTER, UNIV3_QUOTER};
 use crate::decoder::{decode_router_input, extract_pool_key_from_universal_router};
 use crate::lock_manager::LockManager;
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::monitor::monitor_position;
 use crate::nonce::NonceManager;
 use crate::position_dao::{save_position, PositionData};
+use crate::spend_limit::SpendLimitManager;
 use crate::simulation::Simulator;
 use crate::strategies::*;
 use chrono::Local;
@@ -26,6 +27,7 @@ pub async fn process_transaction(
     config: AppConfig,
     targets: Vec<Address>,
     lock_manager: LockManager,
+    spend_manager: Arc<SpendLimitManager>,
 ) {
     if let Some(to) = tx.to {
         let is_from_target = targets.contains(&tx.from);
@@ -65,7 +67,7 @@ pub async fn process_transaction(
 
         let router_name = get_router_name(&to);
         let decoded = decode_router_input(&tx.input);
-        let mut v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
+        let v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
 
         // if let Some(pk) = v4_pool_key {
         //     if is_from_target {
@@ -148,6 +150,28 @@ pub async fn process_transaction(
             log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 
+            // [新增] 周限额检查：获取当前 ETH 对应的 USDC 价值
+            let usdc_strategy = Arc::new(UniswapV3Strategy {
+                router: *UNIV3_ROUTER,
+                quoter: *UNIV3_QUOTER,
+                fee: 3000,
+                name: "PriceCheck".into(),
+            });
+            let usdc_val = match simulator.simulate_bundle(client.address(), usdc_strategy, buy_amt, *USDC_BASE, 0).await {
+                Ok((success, _, out, _, _, _)) if success => out.as_u128() as f64 / 1_000_000.0,
+                _ => 0.0,
+            };
+
+            if usdc_val > 0.0 {
+                let current_weekly = spend_manager.get_weekly_total();
+                if current_weekly + usdc_val > config.weekly_usdc_limit {
+                    warn!("[LIMIT] Weekly limit exceeded! Current: ${:.2}, This trade: ${:.2}, Limit: ${:.2}", 
+                        current_weekly, usdc_val, config.weekly_usdc_limit);
+                    cleanup(token_addr);
+                    return;
+                }
+            }
+
             if config.sniper_block_delay > 0 && !config.shadow_mode {
                 let target_block = provider.get_block_number().await.unwrap_or_default()
                     + config.sniper_block_delay;
@@ -179,7 +203,7 @@ pub async fn process_transaction(
                 let strategy_name = strategy.name().to_string();
                 debug!("[Strategy] Attempting: {}", strategy_name);
                 let sim_res = simulator
-                    .simulate_bundle(client.address(), strategy.clone(), buy_amt, token_addr)
+                    .simulate_bundle(client.address(), strategy.clone(), buy_amt, token_addr, config.slippage_pct)
                     .await;
                 match sim_res {
                     Ok(res) => {
@@ -257,7 +281,15 @@ pub async fn process_transaction(
                 .0;
 
             if config.shadow_mode {
+                spend_manager.add_spend(usdc_val);
                 info!("[Shadow] Sim OK: {}", reason);
+
+                // let email_body = format!(
+                //     "Event: Shadow Buy Triggered\nToken: {:?}\nAmount: {} ETH\nReason: {}\nTarget Wallet: {:?}",
+                //     token_addr, config.buy_amount_eth, reason, tx.from
+                // );
+                // crate::email::send_email_alert("Sniper Bot: Shadow Buy", &email_body);
+
                 log_shadow_trade(ShadowRecord {
                     timestamp: Local::now().to_rfc3339(),
                     event_type: action.to_string(),
@@ -288,13 +320,21 @@ pub async fn process_transaction(
                 strategy.as_ref(),
                 token_addr,
                 buy_amt,
-                expected_tokens * 80 / 100,
+                expected_tokens * (100 - config.slippage_pct) / 100,
                 &config,
             )
             .await
             {
                 Ok(_) => {
+                    spend_manager.add_spend(usdc_val);
                     info!("[PERSIST] Saving position to file...");
+
+                    let email_body = format!(
+                        "Event: Live Buy Confirmed\nToken: {:?}\nAmount: {} ETH\nRouter: {:?}\nTarget Wallet: {:?}",
+                        token_addr, config.buy_amount_eth, effective_router, tx.from
+                    );
+                    crate::email::send_email_alert("Sniper: LIVE BUY SUCCESS", &email_body);
+
                     log_to_file(format!(
                         "[LIVE] Buy Confirmed & Position Saved: {:?}",
                         token_addr

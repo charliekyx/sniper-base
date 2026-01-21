@@ -28,15 +28,15 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         match provider.get_code(addr, None).await {
             Ok(code) => {
                 if code.len() > 0 {
-                    info!("   [OK] Contract '{}' found at {:?}", name, addr);
+                    info!("[OK] Contract '{}' found at {:?}", name, addr);
                 } else {
                     warn!(
-                        "   [WARN] Contract '{}' NOT FOUND at {:?} (Check constants.rs)",
+                        "[WARN] Contract '{}' NOT FOUND at {:?} (Check constants.rs)",
                         name, addr
                     );
                 }
             }
-            Err(e) => error!("   [ERR] Failed to check '{}': {:?}", name, e),
+            Err(e) => error!("[ERR] Failed to check '{}': {:?}", name, e),
         }
     }
 
@@ -179,7 +179,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         let strategy = Arc::new(UniswapV3Strategy {
             router: *AERO_V3_ROUTER,
             quoter: *AERO_V3_QUOTER,
-            fee: 100,
+            fee: 500,
             name: "Aero V3 Test".into(),
         });
 
@@ -210,15 +210,10 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     let token_str = "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d";
     if let Ok(token_addr) = Address::from_str(token_str) {
         info!("[MANUAL TEST] Starting simulation for: {:?}", token_addr);
-        // 使用 Aerodrome 路由进行测试 (支持 Virtuals)
-        let router = *AERODROME_ROUTER;
         let amount = U256::from(10000000000000000u64); // 0.01 ETH
 
-        let strategy = Arc::new(AerodromeV2Strategy {
-            router,
-            factory: *AERODROME_FACTORY,
-            path: vec![*WETH_BASE, *VIRTUAL_TOKEN, token_addr],
-            name: "Manual Test".into(),
+        let strategy = Arc::new(VirtualsStrategy {
+            name: "Manual Test (Virtuals)".into(),
         });
 
         match simulator

@@ -476,7 +476,7 @@ impl Simulator {
                         true,
                         U256::zero(),
                         expected_tokens,
-                        "Sellable but Loss".to_string(),
+                        "Sellable but Loss (SAFE TO TRADE)".to_string(),
                         gas_used,
                         strategy.fee(),
                     ))

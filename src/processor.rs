@@ -257,7 +257,7 @@ pub async fn process_transaction(
                 .0;
 
             if config.shadow_mode {
-                info!("   [Shadow] Sim OK: {}", reason);
+                info!("[Shadow] Sim OK: {}", reason);
                 log_shadow_trade(ShadowRecord {
                     timestamp: Local::now().to_rfc3339(),
                     event_type: action.to_string(),

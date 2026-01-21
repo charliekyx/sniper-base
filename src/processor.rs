@@ -144,7 +144,7 @@ pub async fn process_transaction(
             }
 
             let trigger_msg = format!("Trigger: {} | Token: {:?}", action, token_addr);
-            info!("\n {}", trigger_msg);
+            info!("{}", trigger_msg);
             log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 

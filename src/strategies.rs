@@ -141,6 +141,33 @@ pub fn get_all_strategies(
         }));
     }
 
+    // 1.1 [新增] Clanker V4 盲测策略 (针对 Clanker V4.1)
+    // 排序：Uniswap V4 要求 currency0 < currency1
+    let (c0, c1) = if token_addr < *WETH_BASE {
+        (token_addr, *WETH_BASE)
+    } else {
+        (*WETH_BASE, token_addr)
+    };
+
+    // 构造 Clanker V4.1 常见的两种池子配置
+    // 配置 A: 1% 固定费率 (10000), TickSpacing 200, Static Hook
+    strategies.push(Arc::new(UniswapV4Strategy {
+        pool_key: (c0, c1, 10000, 200, *CLANKER_HOOK_STATIC),
+        name: "Clanker V4 Static (Guess)".into(),
+    }));
+
+    // 配置 B: 动态费率 (Flag 0x800000), TickSpacing 200, Dynamic Hook
+    strategies.push(Arc::new(UniswapV4Strategy {
+        pool_key: (c0, c1, 0x800000, 200, *CLANKER_HOOK_DYNAMIC),
+        name: "Clanker V4 Dynamic (Guess)".into(),
+    }));
+
+    // 配置 C: 针对部分老池子或特殊配置的盲测 (1% Fee, TickSpacing 60)
+    strategies.push(Arc::new(UniswapV4Strategy {
+        pool_key: (c0, c1, 10000, 60, *CLANKER_HOOK_STATIC),
+        name: "Clanker V4 Static 60ts (Guess)".into(),
+    }));
+
     // 2. Uniswap V3 & Forks (Aerodrome Slipstream, PancakeSwap V3)
     strategies.push(Arc::new(UniswapV3Strategy {
         router: *UNIV3_ROUTER,

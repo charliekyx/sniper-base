@@ -27,7 +27,7 @@ pub async fn execute_buy_and_approve(
         amount_out_min,
     )?;
     info!(
-        ">>> [BUNDLE] Preparing Buy + Approve sequence for {:?}...",
+        "[BUNDLE] Preparing Buy + Approve sequence for {:?}...",
         token_out
     );
 
@@ -85,14 +85,14 @@ pub async fn execute_buy_and_approve(
         .nonce(nonce_approve);
 
     info!(
-        ">>> [BUNDLE] Broadcasting Nonce {} & {}...",
+        "[BUNDLE] Broadcasting Nonce {} & {}...",
         nonce_buy, nonce_approve
     );
     let pending_buy = match client.send_transaction(buy_tx.clone(), None).await {
         Ok(p) => p,
         Err(e) => {
-            error!("!!! [ERROR] Buy Tx Failed immediately: {:?}", e);
-            warn!("!!! [RECOVERY] Attempting to resync Nonce from chain...");
+            error!("[ERROR] Buy Tx Failed immediately: {:?}", e);
+            warn!("[RECOVERY] Attempting to resync Nonce from chain...");
             if let Ok(real_nonce) = client.get_transaction_count(client.address(), None).await {
                 nonce_manager.reset(real_nonce.as_u64());
             }
@@ -100,19 +100,19 @@ pub async fn execute_buy_and_approve(
         }
     };
     let _ = client.send_transaction(approve_tx, None).await;
-    info!(">>> [BUNDLE] Buy Sent: {:?}", pending_buy.tx_hash());
+    info!("[BUNDLE] Buy Sent: {:?}", pending_buy.tx_hash());
     match timeout(Duration::from_secs(30), pending_buy).await {
         Ok(receipt_res) => {
             let receipt = receipt_res?;
             if receipt.is_some() && receipt.unwrap().status == Some(U64::from(1)) {
-                info!(">>> [BUNDLE] Buy Confirmed.");
+                info!("[BUNDLE] Buy Confirmed.");
                 Ok(())
             } else {
                 Err(anyhow::anyhow!("Buy transaction reverted"))
             }
         }
         Err(_) => {
-            error!("!!! [ALERT] Transaction STUCK (Low Gas). Please check Explorer !!!");
+            error!("[ALERT] Transaction STUCK (Low Gas). Please check Explorer !!!");
             Err(anyhow::anyhow!("Buy transaction timeout (Stuck)"))
         }
     }

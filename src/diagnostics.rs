@@ -12,7 +12,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 
 pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, owner: Address) {
-    info!(">>> [SELF-CHECK] Running startup diagnostics...");
+    info!("[SELF-CHECK] Running startup diagnostics...");
 
     // 1. 检查关键合约是否存在 (验证地址配置是否正确)
     let checks = vec![
@@ -45,7 +45,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     if let Ok(test_token) = Address::from_str("0x940181a94A35A4569E4529A3CDfB74e38FD98631") {
         let amount_in = U256::from(50000000000000000u64); // 0.05 ETH (Increased to avoid gas loss false positive)
 
-        info!("   [TEST] Simulating WETH -> AERO (Aerodrome) to verify engine...");
+        info!("[TEST] Simulating WETH -> AERO (Aerodrome) to verify engine...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let strategy = Arc::new(AerodromeV2Strategy {
@@ -63,14 +63,14 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
             Ok((success, _, out, reason, _, _)) => {
                 if success {
                     info!(
-                        "   [PASS] Simulation Engine is working. Output: {} AERO",
+                        "[PASS] Simulation Engine is working. Output: {} AERO",
                         out
                     );
                 } else {
-                    error!("   [FAIL] Simulation returned false. Reason: {}", reason);
+                    error!("[FAIL] Simulation returned false. Reason: {}", reason);
                 }
             }
-            Err(e) => error!("   [FAIL] Simulation crashed: {:?}", e),
+            Err(e) => error!("[FAIL] Simulation crashed: {:?}", e),
         }
     }
 
@@ -78,7 +78,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     // USDC: 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913
     if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
         let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
-        info!("   [TEST] Simulating WETH -> USDC (Uniswap V3) to verify V3 logic...");
+        info!("[TEST] Simulating WETH -> USDC (Uniswap V3) to verify V3 logic...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let strategy = Arc::new(UniswapV3Strategy {
@@ -96,14 +96,14 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
             Ok((success, _, out, reason, _, fee)) => {
                 if success {
                     info!(
-                        "   [PASS] V3 Simulation working. Output: {} USDC (Fee Tier: {})",
+                        "[PASS] V3 Simulation working. Output: {} USDC (Fee Tier: {})",
                         out, fee
                     );
                 } else {
-                    error!("   [FAIL] V3 Simulation failed. Reason: {}", reason);
+                    error!("[FAIL] V3 Simulation failed. Reason: {}", reason);
                 }
             }
-            Err(e) => error!("   [FAIL] V3 Simulation crashed: {:?}", e),
+            Err(e) => error!("[FAIL] V3 Simulation crashed: {:?}", e),
         }
     }
 
@@ -111,7 +111,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     // 我们尝试 Quote 一个 V4 池子，只要返回的是合约错误(Revert)而不是系统错误(Invalid Data)，就说明 ABI 编码是完美的
     if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
         let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
-        info!("   [TEST] Simulating V4 Quote (WETH -> USDC) to verify ABI encoding...");
+        info!("[TEST] Simulating V4 Quote (WETH -> USDC) to verify ABI encoding...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let strategy = Arc::new(UniswapV4Strategy {
@@ -126,13 +126,13 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         match sim_res {
             Ok((success, _, out, reason, _, _)) => {
                 if success {
-                    info!("   [PASS] V4 Engine working. Output: {}", out);
+                    info!("[PASS] V4 Engine working. Output: {}", out);
                 } else {
                     // 关键点：只要能收到 Revert，说明 ABI 编码没问题，只是池子不存在
-                    info!("   [PASS] V4 Engine working. Contract responded: '{}' (This proves ABI is correct)", reason);
+                    info!("[PASS] V4 Engine working. Contract responded: '{}' (This proves ABI is correct)", reason);
                 }
             }
-            Err(e) => error!("   [FAIL] V4 Engine crashed: {:?}", e),
+            Err(e) => error!("[FAIL] V4 Engine crashed: {:?}", e),
         }
     }
 
@@ -141,7 +141,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     // 预期结果：合约应该 Revert (例如 "Subject not found" 或类似的)，这证明我们成功调用了合约。
     {
         let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
-        info!("   [TEST] Simulating Virtuals Buy (Random Token) to verify ABI...");
+        info!("[TEST] Simulating Virtuals Buy (Random Token) to verify ABI...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
         // Random token address
         let random_token = Address::from_str("0x1234567890123456789012345678901234567890").unwrap();
@@ -158,22 +158,22 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
             Ok((success, _, out, reason, _, _)) => {
                 if success {
                     info!(
-                        "   [PASS] Virtuals Engine working (Unexpected Success). Output: {}",
+                        "[PASS] Virtuals Engine working (Unexpected Success). Output: {}",
                         out
                     );
                 } else {
                     // 只要能收到 Revert，说明 ABI 编码没问题
-                    info!("   [PASS] Virtuals Engine working. Contract responded: '{}' (This proves ABI is correct)", reason);
+                    info!("[PASS] Virtuals Engine working. Contract responded: '{}' (This proves ABI is correct)", reason);
                 }
             }
-            Err(e) => error!("   [FAIL] Virtuals Engine crashed: {:?}", e),
+            Err(e) => error!("[FAIL] Virtuals Engine crashed: {:?}", e),
         }
     }
 
     // 6. 模拟测试 (Aerodrome V3) 验证 Slipstream 逻辑
     if let Ok(usdc) = Address::from_str("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913") {
         let amount_in = U256::from(50000000000000000u64); // 0.05 ETH
-        info!("   [TEST] Simulating WETH -> USDC (Aerodrome V3) to verify Slipstream logic...");
+        info!("[TEST] Simulating WETH -> USDC (Aerodrome V3) to verify Slipstream logic...");
         let origin = Address::from_str("0x0000000000000000000000000000000000001234").unwrap();
 
         let strategy = Arc::new(UniswapV3Strategy {
@@ -191,17 +191,17 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
             Ok((success, _, out, reason, _, fee)) => {
                 if success {
                     info!(
-                        "   [PASS] Aerodrome V3 Simulation working. Output: {} USDC (Fee Tier: {})",
+                        "[PASS] Aerodrome V3 Simulation working. Output: {} USDC (Fee Tier: {})",
                         out, fee
                     );
                 } else {
                     error!(
-                        "   [FAIL] Aerodrome V3 Simulation failed. Reason: {}",
+                        "[FAIL] Aerodrome V3 Simulation failed. Reason: {}",
                         reason
                     );
                 }
             }
-            Err(e) => error!("   [FAIL] Aerodrome V3 Simulation crashed: {:?}", e),
+            Err(e) => error!("[FAIL] Aerodrome V3 Simulation crashed: {:?}", e),
         }
     }
 
@@ -209,7 +209,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
     // 硬编码测试地址: 0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d (Luna)
     let token_str = "0x55f1fa9b4244d5276aa3e3aaf1ad56ebbc55422d";
     if let Ok(token_addr) = Address::from_str(token_str) {
-        info!("   [MANUAL TEST] Starting simulation for: {:?}", token_addr);
+        info!("[MANUAL TEST] Starting simulation for: {:?}", token_addr);
         // 使用 Aerodrome 路由进行测试 (支持 Virtuals)
         let router = *AERODROME_ROUTER;
         let amount = U256::from(10000000000000000u64); // 0.01 ETH
@@ -227,16 +227,16 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         {
             Ok((success, profit, tokens, reason, gas, _)) => {
                 info!(
-                    "   [MANUAL TEST] Result: Success={}, Profit={}, Tokens={}, Gas={}",
+                    "[MANUAL TEST] Result: Success={}, Profit={}, Tokens={}, Gas={}",
                     success, profit, tokens, gas
                 );
-                info!("   [MANUAL TEST] Reason: {}", reason);
+                info!("[MANUAL TEST] Reason: {}", reason);
             }
             Err(e) => {
-                error!("   [MANUAL TEST] Simulation Error: {:?}", e);
+                error!("[MANUAL TEST] Simulation Error: {:?}", e);
             }
         }
     }
 
-    info!(">>> [SELF-CHECK] Diagnostics complete.\n");
+    info!("[SELF-CHECK] Diagnostics complete.\n");
 }

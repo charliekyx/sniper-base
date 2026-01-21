@@ -11,7 +11,6 @@ pub async fn execute_smart_sell(
     client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     router_addr: Address,
     token_in: Address,
-    _token_out: Address,
     amount_token: U256,
     config: &AppConfig,
     is_panic: bool,
@@ -55,17 +54,17 @@ pub async fn execute_smart_sell(
         }
     };
 
-    info!("<<< [SELL] Attempting to sell: {}...", amount_token);
+    info!("[SELL] Attempting to sell: {}...", amount_token);
     match send_sell(amount_token, if is_panic { 2 } else { 1 }).await {
         Ok(tx_hash) => return Ok(tx_hash),
         Err(e) => error!("   [Sell Fail] 100% Sell failed: {:?}", e),
     }
     if is_panic {
-        warn!("!!! [EMERGENCY] 100% Sell failed. Trying 50% dump to save capital...");
+        warn!("[EMERGENCY] 100% Sell failed. Trying 50% dump to save capital...");
         let half_amount = amount_token / 2;
         match send_sell(half_amount, 3).await {
             Ok(tx_hash) => return Ok(tx_hash),
-            Err(e) => error!("   [Sell Fail] 50% Sell failed: {:?}", e),
+            Err(e) => error!("[Sell Fail] 50% Sell failed: {:?}", e),
         }
     }
     Err(anyhow::anyhow!("All sell attempts failed"))

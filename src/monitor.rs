@@ -151,7 +151,6 @@ pub async fn monitor_position(
                     client.clone(),
                     Address::zero(), // execute_smart_sell 内部会通过 strategy 重新获取 router
                     token_addr,
-                    *WETH_BASE,
                     sell_amount,
                     &config,
                     is_panic,

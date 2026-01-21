@@ -77,7 +77,7 @@ pub fn log_shadow_sell(token: String, initial_eth: String, final_eth: String, st
     };
 
     info!(
-        "   [SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Strategy: {}",
+        "[SHADOW EXIT] Token: {} | Result: {} ETH ({:.2}%) | Strategy: {}",
         token, profit, roi, strategy
     );
 

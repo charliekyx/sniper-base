@@ -20,6 +20,6 @@ impl NonceManager {
 
     pub fn reset(&self, new_nonce: u64) {
         self.nonce.store(new_nonce, Ordering::SeqCst);
-        info!(">>> [NONCE] Resynced to {}", new_nonce);
+        info!("[NONCE] Resynced to {}", new_nonce);
     }
 }

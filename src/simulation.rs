@@ -22,6 +22,12 @@ use tokio::{
 };
 use tracing::{debug, warn};
 
+/// ERC-20 Transfer(address,address,uint256) event signature hash
+const TRANSFER_EVENT_SIG: rB256 = rB256::new([
+    0xdd, 0xf2, 0x52, 0xad, 0x1b, 0xe2, 0xc8, 0x9b, 0x69, 0xc2, 0xb0, 0x68, 0xfc, 0x37, 0x8d, 0xaa,
+    0x95, 0x2b, 0xa7, 0xf1, 0x63, 0xc4, 0xa1, 0x16, 0x28, 0xf5, 0x5a, 0x4d, 0xf5, 0x23, 0xb3, 0xef,
+]);
+
 #[derive(Clone)]
 pub struct Simulator {
     // [修改] 类型改为 Ipc
@@ -119,6 +125,7 @@ impl Simulator {
                 db: Some(&mut cache_db),
             };
 
+            evm.env.tx.caller = my_wallet;
             evm.env.cfg.chain_id = 8453;
             evm.env.block.number = rU256::from(block_number + 1);
             evm.env.block.timestamp =
@@ -130,7 +137,6 @@ impl Simulator {
             let (quote_target, quote_data, quote_value) =
                 strategy.encode_quote(amount_in_eth, *WETH_BASE, token_out)?;
 
-            evm.env.tx.caller = my_wallet;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(quote_target.0));
             evm.env.tx.data = quote_data.0.into();
             evm.env.tx.value = rU256::from_limbs(quote_value.0);
@@ -164,7 +170,7 @@ impl Simulator {
                     output: Output::Create(..),
                     ..
                 } => {
-                    warn!("      [Sim] Quote returned Contract Creation (Unexpected)");
+                    warn!("[Sim] Quote returned Contract Creation (Unexpected)");
                     return Ok((
                         false,
                         U256::zero(),
@@ -174,39 +180,26 @@ impl Simulator {
                         0,
                     ));
                 }
-                // [新增] 捕获 Revert 原因
-                ExecutionResult::Revert { output, .. } => {
+                ExecutionResult::Revert { output, gas_used } => {
                     let reason = decode_revert_reason(&output);
-                    // [优化] V2 路由 Revert(NoData) 通常意味着池子不存在
-                    if reason == "Revert(NoData)" {
-                        return Ok((
-                            false,
-                            U256::zero(),
-                            U256::zero(),
-                            "Pool Not Found (V2)".to_string(),
-                            0,
-                            0,
-                        ));
-                    }
-                    debug!("      [Sim] Quote Reverted: {}", reason);
-                    return Ok((false, U256::zero(), U256::zero(), reason, 0, 0));
+                    let reason = if reason == "Revert(NoData)" {
+                        format!("[{}] Pool Not Found / No Liquidity", strategy.name())
+                    } else {
+                        format!("[{}] {}", strategy.name(), reason)
+                    };
+                    debug!("[Sim] Quote Reverted: {}", reason);
+                    return Ok((false, U256::zero(), U256::zero(), reason, gas_used, 0));
                 }
-                ExecutionResult::Halt { reason, .. } => {
-                    debug!("      [Sim] Quote Halted: {:?}", reason);
-                    return Ok((
-                        false,
-                        U256::zero(),
-                        U256::zero(),
-                        format!("Halt: {:?}", reason),
-                        0,
-                        0,
-                    ));
+                ExecutionResult::Halt { reason, gas_used } => {
+                    let msg = format!("[{}] Halted: {:?}", strategy.name(), reason);
+                    debug!("[Sim] Quote Halted: {:?}", msg);
+                    return Ok((false, U256::zero(), U256::zero(), msg, gas_used, 0));
                 }
             };
 
             if !expected_tokens.is_zero() {
                 debug!(
-                    "      [Sim] Quote Success. Expected Out: {}",
+                    "[Sim] Quote Success. Expected Out: {}",
                     expected_tokens
                 );
             }
@@ -251,49 +244,54 @@ impl Simulator {
             let (buy_target, buy_calldata, buy_value) = strategy.encode_buy(
                 amount_in_eth,
                 token_out,
-                Address::from(my_wallet.0 .0),
+                origin,
                 deadline,
                 U256::zero(),
             )?;
 
-            evm.env.tx.caller = my_wallet;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(buy_target.0));
             evm.env.tx.data = buy_calldata.0.into();
             evm.env.tx.value = rU256::from_limbs(buy_value.0);
             evm.env.tx.gas_limit = 1_000_000; // [优化] 提高 Gas Limit
 
-            // [修复] 正确捕获 Swap 交易的 Revert 原因
+            // 正确捕获 Swap 交易的 Revert 原因
             let buy_result = evm.transact_commit();
             match buy_result {
                 Ok(ExecutionResult::Success { .. }) => {
                     // Swap 成功，继续检查余额
                 }
-                Ok(ExecutionResult::Revert { output, .. }) => {
+                Ok(ExecutionResult::Revert { output, gas_used }) => {
                     let reason = decode_revert_reason(&output);
-                    debug!("      [Sim] Buy Tx Reverted: {}", reason);
+                    let msg = format!("[{}] Buy Reverted: {}", strategy.name(), reason);
+                    debug!("[Sim] {}", msg);
                     return Ok((
                         false,
                         U256::zero(),
                         U256::zero(),
-                        format!("[HONEYPOT/RESTRICTED] Buy Reverted: {}", reason), // [优化] 明确标记
-                        0,
+                        format!("[HONEYPOT/RESTRICTED] {}", msg),
+                        gas_used,
                         0,
                     ));
                 }
+                Ok(ExecutionResult::Halt { reason, gas_used }) => {
+                    let msg = format!("[{}] Buy Halted: {:?}", strategy.name(), reason);
+                    warn!("[Sim] {}", msg);
+                    return Ok((false, U256::zero(), U256::zero(), msg, gas_used, 0));
+                }
                 _ => {
-                    warn!("      [Sim] Buy Tx Failed (System/Halt)");
+                    warn!("[Sim] Buy Tx Failed (System/Halt)");
                     return Ok((
                         false,
                         U256::zero(),
                         U256::zero(),
-                        "Buy Failed (System)".to_string(),
+                        format!("[{}] Buy Failed (System)", strategy.name()),
                         0,
                         0,
                     ));
                 }
             }
 
-            let balance_calldata = token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
+            let balance_calldata = token.encode("balanceOf", origin)?;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(token_out.0));
             evm.env.tx.data = balance_calldata.0.into();
             evm.env.tx.value = rU256::ZERO;
@@ -315,56 +313,50 @@ impl Simulator {
                 }
             };
 
-            if token_balance.is_zero() {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    U256::zero(),
-                    "Zero Tokens (High Tax or No Liquidity)".to_string(),
-                    0,
-                    0,
-                ));
-            }
-
-            // 只有当 expected_tokens > 0 时才检查滑点，否则（盲买）跳过此检查
-            if !expected_tokens.is_zero() && token_balance * 10 < expected_tokens * 8 {
-                return Ok((
-                    false,
-                    U256::zero(),
-                    expected_tokens,
-                    format!(
-                        "High Buy Tax! Exp: {} Got: {}",
-                        expected_tokens, token_balance
-                    ),
-                    0,
-                    0,
-                ));
+            // 合并余额与税率检查
+            if !expected_tokens.is_zero() {
+                if token_balance * 10 < expected_tokens * 8 {
+                    let reason = if token_balance.is_zero() {
+                        "Zero Tokens (No Liquidity/Honeypot)".to_string()
+                    } else {
+                        format!("High Buy Tax! Exp: {} Got: {}", expected_tokens, token_balance)
+                    };
+                    return Ok((false, U256::zero(), expected_tokens, reason, 0, 0));
+                }
+            } else if token_balance.is_zero() {
+                // 盲买模式下的保底检查
+                return Ok((false, U256::zero(), U256::zero(), "Zero Tokens (Blind Buy)".to_string(), 0, 0));
             }
 
             let approve_calldata = token.encode("approve", (buy_target, U256::MAX))?;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(token_out.0));
             evm.env.tx.data = approve_calldata.0.into();
 
-            // [Fix] Check approve result explicitly
+            // Check approve result explicitly
             match evm.transact_commit() {
                 Ok(ExecutionResult::Success { .. }) => {}
-                Ok(ExecutionResult::Revert { output, .. }) => {
+                Ok(ExecutionResult::Revert { output, gas_used }) => {
                     let reason = decode_revert_reason(&output);
+                    let msg = format!("[{}] Approve Reverted: {}", strategy.name(), reason);
                     return Ok((
                         false,
                         U256::zero(),
                         expected_tokens,
-                        format!("Approve Reverted: {}", reason),
-                        0,
+                        msg,
+                        gas_used,
                         0,
                     ));
+                }
+                Ok(ExecutionResult::Halt { reason, gas_used }) => {
+                    let msg = format!("[{}] Approve Halted: {:?}", strategy.name(), reason);
+                    return Ok((false, U256::zero(), expected_tokens, msg, gas_used, 0));
                 }
                 _ => {
                     return Ok((
                         false,
                         U256::zero(),
                         expected_tokens,
-                        "Approve Failed (System)".to_string(),
+                        format!("[{}] Approve Failed (System)", strategy.name()),
                         0,
                         0,
                     ))
@@ -374,38 +366,42 @@ impl Simulator {
             let (sell_target, sell_calldata, sell_value) = strategy.encode_sell(
                 token_balance,
                 token_out,
-                Address::from(my_wallet.0 .0),
+                origin,
                 deadline,
                 U256::zero(),
             )?;
 
-            evm.env.tx.caller = my_wallet;
             evm.env.tx.transact_to = TransactTo::Call(rAddress::from(sell_target.0));
             evm.env.tx.data = sell_calldata.0.into();
             evm.env.tx.value = rU256::from_limbs(sell_value.0);
 
             let sell_result = evm.transact_commit();
 
-            // [Fix] Check sell result explicitly and capture gas/revert reason
+            // Check sell result explicitly and capture gas/revert reason
             let gas_used = match sell_result {
                 Ok(ExecutionResult::Success { gas_used, .. }) => gas_used,
-                Ok(ExecutionResult::Revert { output, .. }) => {
+                Ok(ExecutionResult::Revert { output, gas_used }) => {
                     let reason = decode_revert_reason(&output);
+                    let msg = format!("[{}] Sell Reverted: {}", strategy.name(), reason);
                     return Ok((
                         false,
                         U256::zero(),
                         expected_tokens,
-                        format!("Sell Reverted: {}", reason),
-                        0,
+                        msg,
+                        gas_used,
                         0,
                     ));
+                }
+                Ok(ExecutionResult::Halt { reason, gas_used }) => {
+                    let msg = format!("[{}] Sell Halted: {:?}", strategy.name(), reason);
+                    return Ok((false, U256::zero(), expected_tokens, msg, gas_used, 0));
                 }
                 _ => {
                     return Ok((
                         false,
                         U256::zero(),
                         expected_tokens,
-                        "Sell Failed (System)".to_string(),
+                        format!("[{}] Sell Failed (System)", strategy.name()),
                         0,
                         0,
                     ));
@@ -421,11 +417,11 @@ impl Simulator {
                 .unwrap()
                 .balance;
 
-            // [Fix] V3 Swaps return WETH. Virtuals might also behave unexpectedly.
+            // V3 Swaps return WETH. Virtuals might also behave unexpectedly.
             // We check WETH balance for these strategies to ensure we capture all profit.
             if strategy.name().contains("V3") || strategy.name().contains("Virtuals") {
                 let weth_balance_calldata =
-                    token.encode("balanceOf", Address::from(my_wallet.0 .0))?;
+                    token.encode("balanceOf", origin)?;
                 let revm_weth = rAddress::from(WETH_BASE.0);
                 evm.env.tx.transact_to = TransactTo::Call(revm_weth);
                 evm.env.tx.data = weth_balance_calldata.0.into();
@@ -455,16 +451,16 @@ impl Simulator {
                     strategy.fee(),
                 ))
             } else {
-                // [修复] 增加亏损阈值检查
+                // 增加亏损阈值检查
                 // 计算亏损金额
                 let loss = initial_eth - final_eth;
                 let invest_amt = rU256::from_limbs(amount_in_eth.0);
-                // [修复] 亏损阈值：20% (考虑到滑点和Gas，太低会误杀)
+                // 亏损阈值：20% (考虑到滑点和Gas，太低会误杀)
                 let max_loss = invest_amt * rU256::from(20) / rU256::from(100);
 
                 if loss > max_loss {
                     warn!(
-                        "      [Sim] High Loss: Initial={} Final={} Loss={} Max={}",
+                        "[Sim] High Loss: Initial={} Final={} Loss={} Max={}",
                         initial_eth, final_eth, loss, max_loss
                     );
                     Ok((
@@ -492,26 +488,23 @@ impl Simulator {
         Ok(res)
     }
 
-    // [新增] 自动扫描交易意图：不管 Input 是什么，只要模拟执行后发现目标收到了 Token，就认为是买入
+    // 自动扫描交易意图：不管 Input 是什么，只要模拟执行后发现目标收到了 Token，就认为是买入
     pub async fn scan_tx_for_token_in(&self, tx: Transaction) -> Result<Option<Address>> {
+        // 构造目标地址的 Topic (补齐 32 字节的 Address)
+        let mut topic_bytes = [0u8; 32];
+        topic_bytes[12..32].copy_from_slice(&tx.from.0);
+        let target_topic = rB256::from(topic_bytes);
+
         // 1. 优先策略：直接获取交易回执 (Receipt)
         // 对于已上链的交易，这是最快且 100% 准确的方法，不需要模拟
         // [优化] 增加重试机制，防止节点索引延迟导致查不到 Receipt
         for _ in 0..3 {
             match self.provider.get_transaction_receipt(tx.hash).await {
                 Ok(Some(receipt)) => {
-                    let transfer_sig = rB256::from_str(
-                        "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                    )
-                    .unwrap();
-                    let mut topic_bytes = [0u8; 32];
-                    topic_bytes[12..32].copy_from_slice(&tx.from.0);
-                    let target_topic = rB256::from(topic_bytes); // 补齐 32 字节的 Address
-
                     for log in receipt.logs {
                         // Transfer(from, to, value) -> Topic[0]=Sig, Topic[1]=From, Topic[2]=To
                         if log.topics.len() == 3
-                            && rB256::from_slice(log.topics[0].as_bytes()) == transfer_sig
+                            && rB256::from_slice(log.topics[0].as_bytes()) == TRANSFER_EVENT_SIG
                         {
                             // 检查接收方是否是目标钱包
                             if rB256::from_slice(log.topics[2].as_bytes()) == target_topic {
@@ -530,7 +523,6 @@ impl Simulator {
         }
 
         // 2. 兜底策略：模拟执行 (主要针对 Pending 交易或回执获取失败)
-        // 关键修正：必须基于交易所在区块的 *前一个区块* 进行模拟，否则会因 Nonce 错误而失败
         let sim_block = if let Some(bn) = tx.block_number {
             bn.as_u64().saturating_sub(1)
         } else {
@@ -551,7 +543,7 @@ impl Simulator {
         let fork_db = ForkDB::new(ethers_db);
         let mut cache_db = CacheDB::new(fork_db);
 
-        // [Fix] Manually set balance to MAX to bypass balance checks since disable_balance_check is not available in revm 3.5.0
+        // Manually set balance to MAX to bypass balance checks since disable_balance_check is not available in revm 3.5.0
         // We do this before creating EVM to avoid borrow checker issues
         let caller = rAddress::from(tx.from.0);
         let mut account = cache_db
@@ -560,7 +552,7 @@ impl Simulator {
             .unwrap_or_default();
         account.balance = rU256::MAX;
 
-        // [Fix] Manually set nonce to match the transaction nonce to bypass nonce checks
+        // Manually set nonce to match the transaction nonce to bypass nonce checks
         // This is crucial for simulating past transactions or out-of-order transactions
         account.nonce = tx.nonce.as_u64();
 
@@ -593,20 +585,9 @@ impl Simulator {
         // 执行交易并检查日志
         match evm.transact_commit() {
             Ok(ExecutionResult::Success { logs, .. }) => {
-                // Transfer 事件签名: 0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
-                // 注意：这里我们只关心模拟结果中的日志，因为这是最真实的意图
-                let transfer_sig = rB256::from_str(
-                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                )
-                .unwrap();
-                // 构造目标地址的 Topic (补齐 32 字节)
-                let mut topic_bytes = [0u8; 32];
-                topic_bytes[12..32].copy_from_slice(&tx.from.0);
-                let target_topic = rB256::from(topic_bytes);
-
                 for log in logs {
                     // Transfer(from, to, value) 有 3 个 topic: [Sig, From, To]
-                    if log.topics.len() == 3 && log.topics[0] == transfer_sig {
+                    if log.topics.len() == 3 && log.topics[0] == TRANSFER_EVENT_SIG {
                         // 检查 Topic[2] (To) 是否是目标钱包
                         if log.topics[2] == target_topic {
                             let token_addr = Address::from(log.address.0 .0);

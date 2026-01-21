@@ -286,6 +286,16 @@ pub fn decode_revert_reason(output: &[u8]) -> String {
             return format!("Panic(0x{:02x}): {}", code, reason);
         }
     }
+    // 3. Common DEX Errors (4-byte selectors from Uniswap V3 etc.)
+    else if selector == [0x20, 0xee, 0x30, 0x46] {
+        return "Revert: InsufficientLiquidity".to_string();
+    } else if selector == [0xf6, 0x4c, 0x37, 0x62] {
+        return "Revert: InvalidAmount".to_string();
+    } else if selector == [0x42, 0x30, 0x1c, 0x23] {
+        return "Revert: Locked (Reentrancy)".to_string();
+    } else if selector == [0x1a, 0x6d, 0x24, 0xc3] {
+        return "Revert: TooLittleReceived".to_string();
+    }
     // 3. V4 QuoteFailure(bytes) selector: 0x6190b2b0
     else if selector == [0x61, 0x90, 0xb2, 0xb0] {
         if let Ok(decoded) = ethers::abi::decode(&[ParamType::Bytes], &output[4..]) {

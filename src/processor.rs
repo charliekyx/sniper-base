@@ -84,7 +84,7 @@ pub async fn process_transaction(
                 } else {
                     "0x".to_string()
                 };
-                log_to_file(format!("   [IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {}", to, selector, tx.input.len()));
+                log_to_file(format!("[IGNORED] No token inflow (Sell/Fail/Wrap) | Target tx to {:?} | Selector: 0x{} | InputLen: {}", to, selector, tx.input.len()));
                 return;
             }
         } else {
@@ -95,12 +95,6 @@ pub async fn process_transaction(
             if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
                 token_addr = token;
                 action = "Auto_Buy_Universal".to_string();
-                if v4_pool_key.is_none() {
-                    v4_pool_key = extract_pool_key_from_universal_router(&tx.input);
-                    if v4_pool_key.is_some() {
-                        debug!("   [DEBUG] Late Extraction of V4 PoolKey Success");
-                    }
-                }
             } else {
                 return;
             }
@@ -109,11 +103,11 @@ pub async fn process_transaction(
         if true {
             if is_from_target && router_name == "Unknown" {
                 debug!(
-                    "   [DEBUG] Target interacted with unknown router/contract: {:?}",
+                    "[DEBUG] Target interacted with unknown router/contract: {:?}",
                     to
                 );
                 log_to_file(format!(
-                    "   [DEBUG] Target interacted with unknown router/contract: {:?}",
+                    "[DEBUG] Target interacted with unknown router/contract: {:?}",
                     to
                 ));
             }
@@ -168,7 +162,7 @@ pub async fn process_transaction(
             // 使用封装好的函数获取所有策略
             let strategies = get_all_strategies(token_addr, v4_pool_key);
 
-            info!("   [Strategy] Scanning markets for liquidity...");
+            info!("[Strategy] Scanning markets for liquidity...");
             let mut debug_errors = Vec::new();
             let mut best_sim_res = (
                 false,
@@ -183,7 +177,7 @@ pub async fn process_transaction(
 
             for strategy in strategies {
                 let strategy_name = strategy.name().to_string();
-                debug!("   [Strategy] Attempting: {}", strategy_name);
+                debug!("[Strategy] Attempting: {}", strategy_name);
                 let sim_res = simulator
                     .simulate_bundle(client.address(), strategy.clone(), buy_amt, token_addr)
                     .await;
@@ -191,7 +185,7 @@ pub async fn process_transaction(
                     Ok(res) => {
                         let (success, _, amount_out, ref reason, _, _) = res;
                         debug!(
-                            "      -> Sim Result: Success={}, Gas={}, Reason='{}', Out={}",
+                            "[Sim Result]: Success={}, Gas={}, Reason='{}', Out={}",
                             success, res.4, reason, amount_out
                         );
                         if success {
@@ -223,7 +217,7 @@ pub async fn process_transaction(
                         }
                     }
                     Err(e) => {
-                        error!("      -> Sim Error: {:?}", e);
+                        error!("[Sim Error]: {:?}", e);
                         debug_errors.push(format!("[{}: Error {}]", strategy_name, e));
                     }
                 }
@@ -232,7 +226,7 @@ pub async fn process_transaction(
             let (sim_ok, _profit_wei, expected_tokens, reason, gas_used, best_fee) =
                 best_sim_res.clone();
             if !sim_ok {
-                warn!("   [ABORT] All strategies failed.");
+                warn!("[ABORT] All strategies failed.");
                 for err in &debug_errors {
                     debug!("      -> {}", err);
                 }
@@ -246,7 +240,7 @@ pub async fn process_transaction(
 
             let strategy = best_strategy.unwrap();
             info!(
-                "   [Strategy] Selected Best Route: {} (Reason: {})",
+                "[Strategy] Selected Best Route: {} (Reason: {})",
                 strategy.name(),
                 reason
             );
@@ -300,9 +294,9 @@ pub async fn process_transaction(
             .await
             {
                 Ok(_) => {
-                    info!(">>> [PERSIST] Saving position to file...");
+                    info!("[PERSIST] Saving position to file...");
                     log_to_file(format!(
-                        ">>> [LIVE] Buy Confirmed & Position Saved: {:?}",
+                        "[LIVE] Buy Confirmed & Position Saved: {:?}",
                         token_addr
                     ));
                     let pos_data = PositionData {
@@ -324,7 +318,7 @@ pub async fn process_transaction(
                     ));
                 }
                 Err(e) => {
-                    error!("   [Error] Buy Tx Failed: {:?}", e);
+                    error!("[Error] Buy Tx Failed: {:?}", e);
                     cleanup(token_addr);
                 }
             }

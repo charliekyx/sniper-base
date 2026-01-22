@@ -22,11 +22,13 @@ pub struct AppConfig {
 
     // Strategy
     pub sniper_block_delay: u64,
-    pub sell_strategy_2x_exit_half: bool,
-    pub sell_strategy_3x_exit_all: bool,
+    pub tp1_percent: u64,
+    pub tp1_sell_pct: u64,
+    pub tp2_percent: u64,
+    pub tp2_sell_pct: u64,
     pub anti_rug_dip_threshold: u64,
-    pub slippage_pct: u64,
     pub weekly_usdc_limit: f64,
+    pub slippage_pct: u64,
 }
 
 impl AppConfig {
@@ -70,8 +72,8 @@ impl AppConfig {
 
             sniper_enabled: get_bool("SNIPER_ENABLED"),
             copy_trade_enabled: get_bool("COPY_TRADE_ENABLED"),
-            shadow_mode: get_bool("SHADOW_MODE"),
             copy_sell_enabled: get_bool("COPY_SELL_ENABLED"),
+            shadow_mode: get_bool("SHADOW_MODE"),
             use_private_node: get_bool("USE_PRIVATE_NODE"),
 
             target_wallets: get_vec("TARGET_WALLETS"),
@@ -81,11 +83,13 @@ impl AppConfig {
             max_priority_fee_gwei: get_u64("MAX_PRIORITY_FEE_GWEI", 3),
 
             sniper_block_delay: get_u64("SNIPER_BLOCK_DELAY", 2),
-            sell_strategy_2x_exit_half: get_bool("SELL_STRATEGY_2X_EXIT_HALF"),
-            sell_strategy_3x_exit_all: get_bool("SELL_STRATEGY_3X_EXIT_ALL"),
+            tp1_percent: get_u64("TP1_PERCENT", 30), // 默认 +30% 利润
+            tp1_sell_pct: get_u64("TP1_SELL_PCT", 50), // 默认卖出一半
+            tp2_percent: get_u64("TP2_PERCENT", 80), // 默认 +80% 利润
+            tp2_sell_pct: get_u64("TP2_SELL_PCT", 100), // 默认清仓
             anti_rug_dip_threshold: get_u64("ANTI_RUG_DIP_THRESHOLD", 50),
-            slippage_pct: get_u64("SLIPPAGE_PCT", 20),
-            weekly_usdc_limit: get_f64("WEEKLY_USDC_LIMIT", 50.0),
+            weekly_usdc_limit: get_f64("WEEKLY_USDC_LIMIT", 1000.0),
+            slippage_pct: get_u64("SLIPPAGE_PCT", 15),
         }
     }
 

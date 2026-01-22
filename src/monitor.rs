@@ -46,7 +46,7 @@ pub async fn monitor_position(
         .insert("balanceOf".to_string(), vec![balance_func]);
     let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
 
-    let mut sold_half = false;
+    let mut tp1_triggered = false;
     let mut check_count = 0;
     let mut shadow_balance = initial_simulated_tokens.unwrap_or(U256::zero());
 
@@ -109,27 +109,34 @@ pub async fn monitor_position(
         let mut sell_amount = balance;
         let mut sell_reason = String::new();
 
-        if config.sell_strategy_3x_exit_all && current_val >= initial_cost_eth * 3 {
-            info!("[EXIT] 3x Profit! Dumping ALL.");
+        // 计算目标价格阈值
+        let tp1_threshold = initial_cost_eth + (initial_cost_eth * config.tp1_percent / 100);
+        let tp2_threshold = initial_cost_eth + (initial_cost_eth * config.tp2_percent / 100);
+        let stop_loss_limit = initial_cost_eth * (100 - config.anti_rug_dip_threshold) / 100;
+
+        // 优先级：止损 > TP2 (高利润) > TP1 (低利润)
+        if current_val < stop_loss_limit {
+            warn!("[ALERT] Price crashed! Panic Selling!");
             trigger_sell = true;
-            sell_reason = "3x_Profit".to_string();
-        } else if config.sell_strategy_2x_exit_half
-            && !sold_half
-            && current_val >= initial_cost_eth * 2
-        {
-            info!("[EXIT] 2x Profit! Selling HALF.");
+            is_panic = true;
+            sell_reason = "Stop_Loss".to_string();
+        } else if config.tp2_percent > 0 && current_val >= tp2_threshold {
+            info!(
+                "[EXIT] TP2 Hit ({}%)! Selling {}%.",
+                config.tp2_percent, config.tp2_sell_pct
+            );
             trigger_sell = true;
-            sell_amount = balance / 2;
-            sold_half = true;
-            sell_reason = "2x_Profit_Half".to_string();
-        } else {
-            let stop_loss_limit = initial_cost_eth * (100 - config.anti_rug_dip_threshold) / 100;
-            if current_val < stop_loss_limit {
-                warn!("[ALERT] Price crashed! Panic Selling!");
-                trigger_sell = true;
-                is_panic = true;
-                sell_reason = "Stop_Loss".to_string();
-            }
+            sell_amount = balance * config.tp2_sell_pct / 100;
+            sell_reason = format!("TP2_{}%", config.tp2_percent);
+        } else if config.tp1_percent > 0 && !tp1_triggered && current_val >= tp1_threshold {
+            info!(
+                "[EXIT] TP1 Hit ({}%)! Selling {}%.",
+                config.tp1_percent, config.tp1_sell_pct
+            );
+            trigger_sell = true;
+            sell_amount = balance * config.tp1_sell_pct / 100;
+            tp1_triggered = true;
+            sell_reason = format!("TP1_{}%", config.tp1_percent);
         }
 
         if trigger_sell {
@@ -140,17 +147,7 @@ pub async fn monitor_position(
                     ethers::utils::format_units(current_val, "ether").unwrap(),
                     sell_reason.clone(),
                 );
-
-                // let email_body = format!(
-                //     "Event: Shadow Sell Triggered\nToken: {:?}\nInitial Cost: {} ETH\nFinal Value: {} ETH\nReason: {}",
-                //     token_addr,
-                //     ethers::utils::format_units(initial_cost_eth, "ether").unwrap(),
-                //     ethers::utils::format_units(current_val, "ether").unwrap(),
-                //     sell_reason
-                // );
-                // crate::email::send_email_alert("Sniper: Shadow Sell", &email_body);
-
-                if sell_reason == "2x_Profit_Half" {
+                if sell_amount < balance {
                     shadow_balance = shadow_balance - sell_amount;
                 } else {
                     lock_manager.unlock(token_addr);
@@ -169,15 +166,18 @@ pub async fn monitor_position(
                 )
                 .await;
 
+                // 只有在清仓或恐慌卖出时才释放锁，防止分批止盈时重复买入
+                if sell_amount >= balance || is_panic {
+                    lock_manager.unlock(token_addr);
+                }
+
                 let email_body = format!(
                     "Event: Live Sell Executed\nToken: {:?}\nAmount: {:?}\nReason: {}\nCurrent Value: {} ETH",
                     token_addr, sell_amount, sell_reason, ethers::utils::format_units(current_val, "ether").unwrap()
                 );
                 crate::email::send_email_alert("Sniper: LIVE SELL", &email_body);
-
-                lock_manager.unlock(token_addr);
             }
-            if !sold_half || is_panic {
+            if sell_amount < balance {
                 sleep(Duration::from_secs(5)).await;
             }
         }

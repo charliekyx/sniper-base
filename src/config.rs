@@ -29,6 +29,9 @@ pub struct AppConfig {
     pub anti_rug_dip_threshold: u64,
     pub weekly_usdc_limit: f64,
     pub slippage_pct: u64,
+    pub trailing_stop_enabled: bool,
+    pub trailing_stop_trigger_pct: u64, // 激活移动止损的利润阈值 (如 50%)
+    pub trailing_stop_callback_pct: u64, // 允许回撤的比例 (如 15%)
 }
 
 impl AppConfig {
@@ -90,6 +93,9 @@ impl AppConfig {
             anti_rug_dip_threshold: get_u64("ANTI_RUG_DIP_THRESHOLD", 50),
             weekly_usdc_limit: get_f64("WEEKLY_USDC_LIMIT", 1000.0),
             slippage_pct: get_u64("SLIPPAGE_PCT", 15),
+            trailing_stop_enabled: get_bool("TRAILING_STOP_ENABLED"),
+            trailing_stop_trigger_pct: get_u64("TRAILING_STOP_TRIGGER_PCT", 50),
+            trailing_stop_callback_pct: get_u64("TRAILING_STOP_CALLBACK_PCT", 15),
         }
     }
 

@@ -16,7 +16,7 @@ pub async fn monitor_position(
     client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
     strategy: Arc<dyn DexStrategy>,
     token_addr: Address,
-    initial_cost_eth: U256,
+    initial_cost_eth_arg: U256,
     config: AppConfig,
     lock_manager: LockManager,
     initial_simulated_tokens: Option<U256>,
@@ -49,6 +49,9 @@ pub async fn monitor_position(
     let mut tp1_triggered = false;
     let mut check_count = 0;
     let mut shadow_balance = initial_simulated_tokens.unwrap_or(U256::zero());
+    let mut initial_cost_eth = initial_cost_eth_arg; // 创建可变副本
+    let mut highest_val = initial_cost_eth;
+    let mut last_balance = U256::zero(); // 用于追踪余额变化
 
     loop {
         check_count += 1;
@@ -86,6 +89,33 @@ pub async fn monitor_position(
             break;
         }
 
+        // [新增] 动态成本调整逻辑：配合 Copy Sell 和 分批止盈
+        // 如果检测到余额减少（说明发生了卖出），则按比例下调初始成本和最高价记录
+        if !last_balance.is_zero() && balance < last_balance {
+            let ratio_num = balance;
+            let ratio_den = last_balance;
+
+            // 计算调整后的成本: new_cost = old_cost * (new_balance / old_balance)
+            // 使用 saturating_mul 防止溢出 (虽然理论上不会)
+            initial_cost_eth = initial_cost_eth
+                .saturating_mul(ratio_num)
+                .checked_div(ratio_den)
+                .unwrap_or(initial_cost_eth);
+
+            // 同时也调整最高价值记录，防止因为减仓导致触发移动止损
+            highest_val = highest_val
+                .saturating_mul(ratio_num)
+                .checked_div(ratio_den)
+                .unwrap_or(highest_val);
+
+            info!(
+                "[MONITOR] Position reduced (Copy Sell/TP). Adjusted Cost Basis: {} ETH",
+                ethers::utils::format_units(initial_cost_eth, "ether").unwrap_or_default()
+            );
+        }
+        // 更新 last_balance
+        last_balance = balance;
+
         // 统一使用策略获取当前价值
         let current_val = match strategy.encode_quote(balance, token_addr, *WETH_BASE) {
             Ok((to, data, _)) => {
@@ -104,6 +134,11 @@ pub async fn monitor_position(
             }
         };
 
+        // [优化] 更新最高价值记录 (用于移动止损)
+        if current_val > highest_val {
+            highest_val = current_val;
+        }
+
         let mut trigger_sell = false;
         let mut is_panic = false;
         let mut sell_amount = balance;
@@ -114,29 +149,63 @@ pub async fn monitor_position(
         let tp2_threshold = initial_cost_eth + (initial_cost_eth * config.tp2_percent / 100);
         let stop_loss_limit = initial_cost_eth * (100 - config.anti_rug_dip_threshold) / 100;
 
-        // 优先级：止损 > TP2 (高利润) > TP1 (低利润)
+        // 1. 优先级最高：硬止损 (Hard Stop Loss)
         if current_val < stop_loss_limit {
             warn!("[ALERT] Price crashed! Panic Selling!");
             trigger_sell = true;
             is_panic = true;
             sell_reason = "Stop_Loss".to_string();
-        } else if config.tp2_percent > 0 && current_val >= tp2_threshold {
-            info!(
-                "[EXIT] TP2 Hit ({}%)! Selling {}%.",
-                config.tp2_percent, config.tp2_sell_pct
-            );
-            trigger_sell = true;
-            sell_amount = balance * config.tp2_sell_pct / 100;
-            sell_reason = format!("TP2_{}%", config.tp2_percent);
-        } else if config.tp1_percent > 0 && !tp1_triggered && current_val >= tp1_threshold {
-            info!(
-                "[EXIT] TP1 Hit ({}%)! Selling {}%.",
-                config.tp1_percent, config.tp1_sell_pct
-            );
-            trigger_sell = true;
-            sell_amount = balance * config.tp1_sell_pct / 100;
-            tp1_triggered = true;
-            sell_reason = format!("TP1_{}%", config.tp1_percent);
+        } else {
+            // 2. 检查移动止损 (Trailing Stop) 或 TP2
+            // 如果开启了移动止损，则优先使用移动止损逻辑，忽略 TP2 (让利润奔跑)
+            // 如果未开启移动止损，则使用 TP2 作为硬止盈
+            if config.trailing_stop_enabled {
+                let activation_price =
+                    initial_cost_eth + (initial_cost_eth * config.trailing_stop_trigger_pct / 100);
+
+                // 只有当当前最高价超过激活阈值时，才检查回撤
+                if highest_val >= activation_price {
+                    let callback_price =
+                        highest_val * (100 - config.trailing_stop_callback_pct) / 100;
+                    if current_val < callback_price {
+                        info!(
+                            "[EXIT] Trailing Stop Hit! High: {}, Curr: {}",
+                            ethers::utils::format_units(highest_val, "ether").unwrap(),
+                            ethers::utils::format_units(current_val, "ether").unwrap()
+                        );
+                        trigger_sell = true;
+                        sell_reason = format!(
+                            "Trailing_Stop_High_{}",
+                            ethers::utils::format_units(highest_val, "ether").unwrap()
+                        );
+                    }
+                }
+            } else if config.tp2_percent > 0 && current_val >= tp2_threshold {
+                info!(
+                    "[EXIT] TP2 Hit ({}%)! Selling {}%.",
+                    config.tp2_percent, config.tp2_sell_pct
+                );
+                trigger_sell = true;
+                sell_amount = balance * config.tp2_sell_pct / 100;
+                sell_reason = format!("TP2_{}%", config.tp2_percent);
+            }
+
+            // 3. 独立检查 TP1 (回本逻辑)
+            // 只要没有触发清仓卖出 (trigger_sell 为 false)，且 TP1 未触发过，就检查 TP1
+            if !trigger_sell
+                && config.tp1_percent > 0
+                && !tp1_triggered
+                && current_val >= tp1_threshold
+            {
+                info!(
+                    "[EXIT] TP1 Hit ({}%)! Selling {}%.",
+                    config.tp1_percent, config.tp1_sell_pct
+                );
+                trigger_sell = true;
+                sell_amount = balance * config.tp1_sell_pct / 100;
+                tp1_triggered = true;
+                sell_reason = format!("TP1_{}%", config.tp1_percent);
+            }
         }
 
         if trigger_sell {
@@ -181,6 +250,6 @@ pub async fn monitor_position(
                 sleep(Duration::from_secs(5)).await;
             }
         }
-        sleep(Duration::from_secs(2)).await;
+        sleep(Duration::from_secs(1)).await;
     }
 }

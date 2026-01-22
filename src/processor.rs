@@ -1,15 +1,15 @@
 use crate::buy::execute_buy_and_approve;
-use crate::sell::execute_smart_sell;
 use crate::config::AppConfig;
-use crate::constants::{get_router_name, WETH_BASE, USDC_BASE, UNIV3_ROUTER, UNIV3_QUOTER};
+use crate::constants::{get_router_name, UNIV3_QUOTER, UNIV3_ROUTER, USDC_BASE, WETH_BASE};
 use crate::decoder::{decode_router_input, extract_pool_key_from_universal_router};
 use crate::lock_manager::LockManager;
 use crate::logger::{log_shadow_trade, log_to_file, ShadowRecord};
 use crate::monitor::monitor_position;
 use crate::nonce::NonceManager;
-use crate::position_dao::{save_position, PositionData};
-use crate::spend_limit::SpendLimitManager;
+use crate::position_dao::{get_position, save_position, PositionData};
+use crate::sell::execute_smart_sell;
 use crate::simulation::Simulator;
+use crate::spend_limit::SpendLimitManager;
 use crate::strategies::*;
 use chrono::Local;
 use ethers::prelude::*;
@@ -132,7 +132,7 @@ pub async fn process_transaction(
             let is_target_buy = config.copy_trade_enabled
                 && is_from_target
                 && (action.contains("Buy") || action.contains("Swap") || action == "Auto_Buy");
-            
+
             // 检测目标是否在卖出
             let is_target_sell = config.copy_sell_enabled
                 && is_from_target
@@ -157,23 +157,41 @@ pub async fn process_transaction(
                         return;
                     }
 
-                    info!("[COPY SELL] Leader {:?} is selling {:?}. Calculating ratio...", tx.from, token_addr);
-                    
+                    info!(
+                        "[COPY SELL] Leader {:?} is selling {:?}. Calculating ratio...",
+                        tx.from, token_addr
+                    );
+
                     // 简单的获取余额逻辑 (构建最小 ABI)
                     let mut erc20_abi = ethers::abi::Abi::default();
                     let balance_func = ethers::abi::Function {
                         name: "balanceOf".to_string(),
-                        inputs: vec![ethers::abi::Param { name: "account".to_string(), kind: ethers::abi::ParamType::Address, internal_type: None }],
-                        outputs: vec![ethers::abi::Param { name: "balance".to_string(), kind: ethers::abi::ParamType::Uint(256), internal_type: None }],
+                        inputs: vec![ethers::abi::Param {
+                            name: "account".to_string(),
+                            kind: ethers::abi::ParamType::Address,
+                            internal_type: None,
+                        }],
+                        outputs: vec![ethers::abi::Param {
+                            name: "balance".to_string(),
+                            kind: ethers::abi::ParamType::Uint(256),
+                            internal_type: None,
+                        }],
                         constant: Some(true),
                         state_mutability: ethers::abi::StateMutability::View,
                     };
-                    erc20_abi.functions.insert("balanceOf".to_string(), vec![balance_func]);
+                    erc20_abi
+                        .functions
+                        .insert("balanceOf".to_string(), vec![balance_func]);
                     let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
-                    
+
                     // 1. 获取当前的余额 (卖出后的余额)
-                    let leader_balance_after = token_contract.method::<_, U256>("balanceOf", leader).unwrap().call().await.unwrap_or(U256::zero());
-                    
+                    let leader_balance_after = token_contract
+                        .method::<_, U256>("balanceOf", leader)
+                        .unwrap()
+                        .call()
+                        .await
+                        .unwrap_or(U256::zero());
+
                     // 2. 计算卖出比例
                     // 如果解析不到 amount_in (为0)，则默认全仓卖出 (ratio = 1.0)
                     let ratio = if amount_in.is_zero() {
@@ -190,7 +208,12 @@ pub async fn process_transaction(
                     };
 
                     // 3. 获取我的余额
-                    if let Ok(my_balance) = token_contract.method::<_, U256>("balanceOf", client.address()).unwrap().call().await {
+                    if let Ok(my_balance) = token_contract
+                        .method::<_, U256>("balanceOf", client.address())
+                        .unwrap()
+                        .call()
+                        .await
+                    {
                         if !my_balance.is_zero() {
                             // 4. 计算我的卖出数量
                             let my_sell_amount = if ratio >= 0.99 {
@@ -201,23 +224,46 @@ pub async fn process_transaction(
                                 U256::from(sell_f as u128)
                             };
 
-                            if my_sell_amount.is_zero() { return; }
+                            if my_sell_amount.is_zero() {
+                                return;
+                            }
 
-                            info!("[COPY SELL] Ratio: {:.2}% | My Sell: {} / {}", ratio * 100.0, my_sell_amount, my_balance);
+                            info!(
+                                "[COPY SELL] Ratio: {:.2}% | My Sell: {} / {}",
+                                ratio * 100.0,
+                                my_sell_amount,
+                                my_balance
+                            );
+
+                            // 尝试加载持仓信息以获取正确的 Router/Strategy
+                            let strategy_opt = if let Some(pos) = get_position(token_addr) {
+                                Some(Arc::from(get_strategy_for_position(
+                                    pos.router_address,
+                                    pos.fee.unwrap_or(0),
+                                    token_addr,
+                                )))
+                            } else {
+                                None // 如果找不到持仓文件，execute_smart_sell 会失败，但这比盲目卖出好
+                            };
 
                             // 执行卖出
                             let _ = execute_smart_sell(
                                 client.clone(),
-                                Address::zero(), // 让函数内部去寻找最佳路由
+                                strategy_opt, // 传入恢复的策略
+                                Address::zero(),
                                 token_addr,
                                 my_sell_amount,
                                 &config,
                                 true, // 视为 Panic Sell，优先成交
                                 0,    // Fee 自动获取
                                 None, // Pool Key 自动获取
-                            ).await;
-                            
-                            let email_body = format!("Event: Copy Sell Executed\nTarget: {:?}\nToken: {:?}", tx.from, token_addr);
+                            )
+                            .await;
+
+                            let email_body = format!(
+                                "Event: Copy Sell Executed\nTarget: {:?}\nToken: {:?}",
+                                tx.from, token_addr
+                            );
                             crate::email::send_email_alert("Sniper: COPY SELL", &email_body);
                         }
                     }
@@ -230,7 +276,11 @@ pub async fn process_transaction(
             }
 
             // 确定 Leader: 如果是跟单，Leader 就是 tx.from；如果是狙击，Leader 为 0 地址
-            let leader = if is_target_buy { tx.from } else { Address::zero() };
+            let leader = if is_target_buy {
+                tx.from
+            } else {
+                Address::zero()
+            };
 
             // 买入逻辑 (只有未锁定的才买)
             if !lock_manager.try_lock(token_addr, leader) {
@@ -249,7 +299,10 @@ pub async fn process_transaction(
                 fee: 3000,
                 name: "PriceCheck".into(),
             });
-            let usdc_val = match simulator.simulate_bundle(client.address(), usdc_strategy, buy_amt, *USDC_BASE, 0).await {
+            let usdc_val = match simulator
+                .simulate_bundle(client.address(), usdc_strategy, buy_amt, *USDC_BASE, 0)
+                .await
+            {
                 Ok((success, _, out, _, _, _)) if success => out.as_u128() as f64 / 1_000_000.0,
                 _ => 0.0,
             };
@@ -295,7 +348,13 @@ pub async fn process_transaction(
                 let strategy_name = strategy.name().to_string();
                 debug!("[Strategy] Attempting: {}", strategy_name);
                 let sim_res = simulator
-                    .simulate_bundle(client.address(), strategy.clone(), buy_amt, token_addr, config.slippage_pct)
+                    .simulate_bundle(
+                        client.address(),
+                        strategy.clone(),
+                        buy_amt,
+                        token_addr,
+                        config.slippage_pct,
+                    )
                     .await;
                 match sim_res {
                     Ok(res) => {

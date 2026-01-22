@@ -14,6 +14,9 @@ impl DexStrategy for AerodromeV2Strategy {
     fn name(&self) -> &str {
         &self.name
     }
+    fn router(&self) -> Option<Address> {
+        Some(self.router)
+    }
 
     fn encode_quote(
         &self,
@@ -85,25 +88,104 @@ impl DexStrategy for AerodromeV2Strategy {
 
 fn aero_abi() -> Abi {
     let mut abi = Abi::default();
-    let route_type = ParamType::Tuple(vec![ParamType::Address, ParamType::Address, ParamType::Bool, ParamType::Address]);
+    let route_type = ParamType::Tuple(vec![
+        ParamType::Address,
+        ParamType::Address,
+        ParamType::Bool,
+        ParamType::Address,
+    ]);
     let get_out = Function {
         name: "getAmountsOut".to_string(),
-        inputs: vec![Param { name: "amountIn".to_string(), kind: ParamType::Uint(256), internal_type: None }, Param { name: "routes".to_string(), kind: ParamType::Array(Box::new(route_type.clone())), internal_type: None }],
-        outputs: vec![Param { name: "amounts".to_string(), kind: ParamType::Array(Box::new(ParamType::Uint(256))), internal_type: None }],
-        constant: Some(true), state_mutability: StateMutability::View,
+        inputs: vec![
+            Param {
+                name: "amountIn".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "routes".to_string(),
+                kind: ParamType::Array(Box::new(route_type.clone())),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![Param {
+            name: "amounts".to_string(),
+            kind: ParamType::Array(Box::new(ParamType::Uint(256))),
+            internal_type: None,
+        }],
+        constant: Some(true),
+        state_mutability: StateMutability::View,
     };
     let swap_eth = Function {
         name: "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
-        inputs: vec![Param { name: "amountOutMin".to_string(), kind: ParamType::Uint(256), internal_type: None }, Param { name: "routes".to_string(), kind: ParamType::Array(Box::new(route_type.clone())), internal_type: None }, Param { name: "to".to_string(), kind: ParamType::Address, internal_type: None }, Param { name: "deadline".to_string(), kind: ParamType::Uint(256), internal_type: None }],
-        outputs: vec![], constant: None, state_mutability: StateMutability::Payable,
+        inputs: vec![
+            Param {
+                name: "amountOutMin".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "routes".to_string(),
+                kind: ParamType::Array(Box::new(route_type.clone())),
+                internal_type: None,
+            },
+            Param {
+                name: "to".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            },
+            Param {
+                name: "deadline".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![],
+        constant: None,
+        state_mutability: StateMutability::Payable,
     };
     let swap_tokens = Function {
         name: "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
-        inputs: vec![Param { name: "amountIn".to_string(), kind: ParamType::Uint(256), internal_type: None }, Param { name: "amountOutMin".to_string(), kind: ParamType::Uint(256), internal_type: None }, Param { name: "routes".to_string(), kind: ParamType::Array(Box::new(route_type)), internal_type: None }, Param { name: "to".to_string(), kind: ParamType::Address, internal_type: None }, Param { name: "deadline".to_string(), kind: ParamType::Uint(256), internal_type: None }],
-        outputs: vec![], constant: None, state_mutability: StateMutability::NonPayable,
+        inputs: vec![
+            Param {
+                name: "amountIn".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "amountOutMin".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "routes".to_string(),
+                kind: ParamType::Array(Box::new(route_type)),
+                internal_type: None,
+            },
+            Param {
+                name: "to".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            },
+            Param {
+                name: "deadline".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![],
+        constant: None,
+        state_mutability: StateMutability::NonPayable,
     };
-    abi.functions.insert("getAmountsOut".to_string(), vec![get_out]);
-    abi.functions.insert("swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(), vec![swap_eth]);
-    abi.functions.insert("swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(), vec![swap_tokens]);
+    abi.functions
+        .insert("getAmountsOut".to_string(), vec![get_out]);
+    abi.functions.insert(
+        "swapExactETHForTokensSupportingFeeOnTransferTokens".to_string(),
+        vec![swap_eth],
+    );
+    abi.functions.insert(
+        "swapExactTokensForETHSupportingFeeOnTransferTokens".to_string(),
+        vec![swap_tokens],
+    );
     abi
 }

@@ -1,6 +1,6 @@
 use crate::config::AppConfig;
 use crate::decoder::PoolKey;
-use crate::strategies::{get_strategy_for_position, UniswapV4Strategy};
+use crate::strategies::{get_strategy_for_position, DexStrategy, UniswapV4Strategy};
 use chrono::Local;
 use ethers::prelude::*;
 use ethers::providers::{Ipc, Middleware, Provider};
@@ -9,6 +9,7 @@ use tracing::{error, info, warn};
 
 pub async fn execute_smart_sell(
     client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>,
+    strategy_opt: Option<Arc<dyn DexStrategy>>, // [新增] 优先使用现成策略
     router_addr: Address,
     token_in: Address,
     amount_token: U256,
@@ -20,13 +21,15 @@ pub async fn execute_smart_sell(
     let deadline = U256::from(Local::now().timestamp() + 120);
 
     // 1. 获取对应的策略对象
-    let strategy = if let Some(pk) = v4_pool_key {
-        Box::new(UniswapV4Strategy {
+    let strategy: Arc<dyn DexStrategy> = if let Some(s) = strategy_opt {
+        s
+    } else if let Some(pk) = v4_pool_key {
+        Arc::new(UniswapV4Strategy {
             pool_key: pk,
             name: "V4 Sell".into(),
         })
     } else {
-        get_strategy_for_position(router_addr, fee, token_in)
+        Arc::from(get_strategy_for_position(router_addr, fee, token_in))
     };
 
     let send_sell = |amt: U256, gas_mult: u64| {

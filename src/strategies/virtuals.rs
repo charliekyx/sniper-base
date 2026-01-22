@@ -15,6 +15,9 @@ impl DexStrategy for VirtualsStrategy {
     fn quote_requires_commit(&self) -> bool {
         true
     }
+    fn router(&self) -> Option<Address> {
+        Some(*VIRTUALS_FACTORY_ROUTER)
+    }
 
     fn encode_quote(
         &self,
@@ -67,9 +70,57 @@ impl DexStrategy for VirtualsStrategy {
 
 fn virtuals_abi() -> Abi {
     let mut abi = Abi::default();
-    let buy = Function { name: "buy".to_string(), inputs: vec![Param { name: "token".to_string(), kind: ParamType::Address, internal_type: None }, Param { name: "amountIn".to_string(), kind: ParamType::Uint(256), internal_type: None }, Param { name: "minAmountOut".to_string(), kind: ParamType::Uint(256), internal_type: None }], outputs: vec![Param { name: "amountOut".to_string(), kind: ParamType::Uint(256), internal_type: None }], constant: None, state_mutability: StateMutability::Payable };
-    let get_sell_price = Function { name: "getSellPrice".to_string(), inputs: vec![Param { name: "token".to_string(), kind: ParamType::Address, internal_type: None }, Param { name: "amount".to_string(), kind: ParamType::Uint(256), internal_type: None }], outputs: vec![Param { name: "price".to_string(), kind: ParamType::Uint(256), internal_type: None }], constant: Some(true), state_mutability: StateMutability::View };
+    let buy = Function {
+        name: "buy".to_string(),
+        inputs: vec![
+            Param {
+                name: "token".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            },
+            Param {
+                name: "amountIn".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "minAmountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![Param {
+            name: "amountOut".to_string(),
+            kind: ParamType::Uint(256),
+            internal_type: None,
+        }],
+        constant: None,
+        state_mutability: StateMutability::Payable,
+    };
+    let get_sell_price = Function {
+        name: "getSellPrice".to_string(),
+        inputs: vec![
+            Param {
+                name: "token".to_string(),
+                kind: ParamType::Address,
+                internal_type: None,
+            },
+            Param {
+                name: "amount".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![Param {
+            name: "price".to_string(),
+            kind: ParamType::Uint(256),
+            internal_type: None,
+        }],
+        constant: Some(true),
+        state_mutability: StateMutability::View,
+    };
     abi.functions.insert("buy".to_string(), vec![buy]);
-    abi.functions.insert("getSellPrice".to_string(), vec![get_sell_price]);
+    abi.functions
+        .insert("getSellPrice".to_string(), vec![get_sell_price]);
     abi
 }

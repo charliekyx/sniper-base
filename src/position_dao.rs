@@ -13,7 +13,7 @@ pub struct PositionData {
     pub timestamp: u64,
     pub fee: Option<u32>, // Fee Tier, 费率层级，Added for V3 support
     #[serde(default)]
-    pub leader_wallet: Option<Address>, // 记录带单的钱包地址
+    pub leader_wallet: Option<Address>,
 }
 
 pub fn init_storage() {
@@ -53,4 +53,14 @@ pub fn load_all_positions() -> Vec<PositionData> {
         }
     }
     positions
+}
+
+pub fn get_position(token_address: Address) -> Option<PositionData> {
+    let filename = format!("positions/{:?}.json", token_address);
+    if let Ok(file) = File::open(filename) {
+        let reader = BufReader::new(file);
+        serde_json::from_reader(reader).ok()
+    } else {
+        None
+    }
 }

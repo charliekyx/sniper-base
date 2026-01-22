@@ -110,7 +110,7 @@ pub async fn monitor_position(
 
             info!(
                 "[MONITOR] Position reduced (Copy Sell/TP). Adjusted Cost Basis: {} ETH",
-                ethers::utils::format_units(initial_cost_eth, "ether").unwrap_or_default()
+                format_ether(initial_cost_eth)
             );
         }
         // 更新 last_balance
@@ -170,14 +170,11 @@ pub async fn monitor_position(
                     if current_val < callback_price {
                         info!(
                             "[EXIT] Trailing Stop Hit! High: {}, Curr: {}",
-                            ethers::utils::format_units(highest_val, "ether").unwrap(),
-                            ethers::utils::format_units(current_val, "ether").unwrap()
+                            format_ether(highest_val),
+                            format_ether(current_val)
                         );
                         trigger_sell = true;
-                        sell_reason = format!(
-                            "Trailing_Stop_High_{}",
-                            ethers::utils::format_units(highest_val, "ether").unwrap()
-                        );
+                        sell_reason = format!("Trailing_Stop_High_{}", format_ether(highest_val));
                     }
                 }
             } else if config.tp2_percent > 0 && current_val >= tp2_threshold {
@@ -212,8 +209,8 @@ pub async fn monitor_position(
             if config.shadow_mode {
                 crate::logger::log_shadow_sell(
                     format!("{:?}", token_addr),
-                    ethers::utils::format_units(initial_cost_eth, "ether").unwrap(),
-                    ethers::utils::format_units(current_val, "ether").unwrap(),
+                    format_ether(initial_cost_eth),
+                    format_ether(current_val),
                     sell_reason.clone(),
                 );
                 if sell_amount < balance {
@@ -225,7 +222,8 @@ pub async fn monitor_position(
             } else {
                 let _ = execute_smart_sell(
                     client.clone(),
-                    Address::zero(), // execute_smart_sell 内部会通过 strategy 重新获取 router
+                    Some(strategy.clone()), // 传入当前策略，不再传空 Router
+                    Address::zero(),        // Router 地址在此处被忽略，使用 0 地址占位
                     token_addr,
                     sell_amount,
                     &config,
@@ -238,11 +236,12 @@ pub async fn monitor_position(
                 // 只有在清仓或恐慌卖出时才释放锁，防止分批止盈时重复买入
                 if sell_amount >= balance || is_panic {
                     lock_manager.unlock(token_addr);
+                    break; // [修复] 全仓卖出后必须退出循环，防止重复卖出
                 }
 
                 let email_body = format!(
                     "Event: Live Sell Executed\nToken: {:?}\nAmount: {:?}\nReason: {}\nCurrent Value: {} ETH",
-                    token_addr, sell_amount, sell_reason, ethers::utils::format_units(current_val, "ether").unwrap()
+                    token_addr, sell_amount, sell_reason, format_ether(current_val)
                 );
                 crate::email::send_email_alert("Sniper: LIVE SELL", &email_body);
             }
@@ -252,4 +251,9 @@ pub async fn monitor_position(
         }
         sleep(Duration::from_secs(1)).await;
     }
+}
+
+// 辅助函数：安全地格式化 Ether 单位
+fn format_ether(amount: U256) -> String {
+    ethers::utils::format_units(amount, "ether").unwrap_or_else(|_| "0.0".to_string())
 }

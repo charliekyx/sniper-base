@@ -18,6 +18,9 @@ impl DexStrategy for UniswapV3Strategy {
     fn fee(&self) -> u32 {
         self.fee
     }
+    fn router(&self) -> Option<Address> {
+        Some(self.router)
+    }
 
     fn encode_quote(
         &self,
@@ -95,38 +98,68 @@ fn v3_quoter_abi() -> Abi {
     ]);
     let quote_func = Function {
         name: "quoteExactInputSingle".to_string(),
-        inputs: vec![Param { name: "params".to_string(), kind: v3_params_type, internal_type: None }],
+        inputs: vec![Param {
+            name: "params".to_string(),
+            kind: v3_params_type,
+            internal_type: None,
+        }],
         outputs: vec![
-            Param { name: "amountOut".to_string(), kind: ParamType::Uint(256), internal_type: None },
-            Param { name: "sqrtPriceX96After".to_string(), kind: ParamType::Uint(160), internal_type: None },
-            Param { name: "initializedTicksCrossed".to_string(), kind: ParamType::Uint(32), internal_type: None },
-            Param { name: "gasEstimate".to_string(), kind: ParamType::Uint(256), internal_type: None },
+            Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "sqrtPriceX96After".to_string(),
+                kind: ParamType::Uint(160),
+                internal_type: None,
+            },
+            Param {
+                name: "initializedTicksCrossed".to_string(),
+                kind: ParamType::Uint(32),
+                internal_type: None,
+            },
+            Param {
+                name: "gasEstimate".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
         ],
         constant: None,
         state_mutability: StateMutability::NonPayable,
     };
-    abi.functions.insert("quoteExactInputSingle".to_string(), vec![quote_func]);
+    abi.functions
+        .insert("quoteExactInputSingle".to_string(), vec![quote_func]);
     abi
 }
 
 fn v3_router_abi() -> Abi {
     let mut abi = Abi::default();
     let v3_swap_params_type = ParamType::Tuple(vec![
-        ParamType::Address,  // tokenIn
-        ParamType::Address,  // tokenOut
-        ParamType::Uint(24), // fee
-        ParamType::Address,  // recipient
+        ParamType::Address,   // tokenIn
+        ParamType::Address,   // tokenOut
+        ParamType::Uint(24),  // fee
+        ParamType::Address,   // recipient
         ParamType::Uint(256), // amountIn
         ParamType::Uint(256), // amountOutMinimum
         ParamType::Uint(160), // sqrtPriceLimitX96
     ]);
     let swap_func = Function {
         name: "exactInputSingle".to_string(),
-        inputs: vec![Param { name: "params".to_string(), kind: v3_swap_params_type, internal_type: None }],
-        outputs: vec![Param { name: "amountOut".to_string(), kind: ParamType::Uint(256), internal_type: None }],
+        inputs: vec![Param {
+            name: "params".to_string(),
+            kind: v3_swap_params_type,
+            internal_type: None,
+        }],
+        outputs: vec![Param {
+            name: "amountOut".to_string(),
+            kind: ParamType::Uint(256),
+            internal_type: None,
+        }],
         constant: None,
         state_mutability: StateMutability::Payable,
     };
-    abi.functions.insert("exactInputSingle".to_string(), vec![swap_func]);
+    abi.functions
+        .insert("exactInputSingle".to_string(), vec![swap_func]);
     abi
 }

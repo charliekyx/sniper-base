@@ -23,6 +23,9 @@ impl DexStrategy for UniswapV4Strategy {
     fn simulation_behavior(&self) -> SimulationBehavior {
         SimulationBehavior::QuoteOnly
     }
+    fn router(&self) -> Option<Address> {
+        Some(*UNIVERSAL_ROUTER)
+    }
 
     fn encode_quote(
         &self,
@@ -133,19 +136,43 @@ impl DexStrategy for UniswapV4Strategy {
 
 fn v4_quoter_abi() -> Abi {
     let mut abi = Abi::default();
-    let pk = ParamType::Tuple(vec![ParamType::Address, ParamType::Address, ParamType::Uint(24), ParamType::Int(24), ParamType::Address]);
-    let params = ParamType::Tuple(vec![pk, ParamType::Bool, ParamType::Uint(128), ParamType::Bytes]);
+    let pk = ParamType::Tuple(vec![
+        ParamType::Address,
+        ParamType::Address,
+        ParamType::Uint(24),
+        ParamType::Int(24),
+        ParamType::Address,
+    ]);
+    let params = ParamType::Tuple(vec![
+        pk,
+        ParamType::Bool,
+        ParamType::Uint(128),
+        ParamType::Bytes,
+    ]);
     let func = Function {
         name: "quoteExactInputSingle".to_string(),
-        inputs: vec![Param { name: "params".to_string(), kind: params, internal_type: None }],
+        inputs: vec![Param {
+            name: "params".to_string(),
+            kind: params,
+            internal_type: None,
+        }],
         outputs: vec![
-            Param { name: "amountOut".to_string(), kind: ParamType::Uint(256), internal_type: None },
-            Param { name: "gasEstimate".to_string(), kind: ParamType::Uint(128), internal_type: None },
+            Param {
+                name: "amountOut".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+            Param {
+                name: "gasEstimate".to_string(),
+                kind: ParamType::Uint(128),
+                internal_type: None,
+            },
         ],
         constant: None,
         state_mutability: StateMutability::NonPayable,
     };
-    abi.functions.insert("quoteExactInputSingle".to_string(), vec![func]);
+    abi.functions
+        .insert("quoteExactInputSingle".to_string(), vec![func]);
     abi
 }
 
@@ -153,8 +180,26 @@ fn universal_router_abi() -> Abi {
     let mut abi = Abi::default();
     let execute = Function {
         name: "execute".to_string(),
-        inputs: vec![Param { name: "commands".to_string(), kind: ParamType::Bytes, internal_type: None }, Param { name: "inputs".to_string(), kind: ParamType::Array(Box::new(ParamType::Bytes)), internal_type: None }, Param { name: "deadline".to_string(), kind: ParamType::Uint(256), internal_type: None }],
-        outputs: vec![], constant: None, state_mutability: StateMutability::Payable,
+        inputs: vec![
+            Param {
+                name: "commands".to_string(),
+                kind: ParamType::Bytes,
+                internal_type: None,
+            },
+            Param {
+                name: "inputs".to_string(),
+                kind: ParamType::Array(Box::new(ParamType::Bytes)),
+                internal_type: None,
+            },
+            Param {
+                name: "deadline".to_string(),
+                kind: ParamType::Uint(256),
+                internal_type: None,
+            },
+        ],
+        outputs: vec![],
+        constant: None,
+        state_mutability: StateMutability::Payable,
     };
     abi.functions.insert("execute".to_string(), vec![execute]);
     abi

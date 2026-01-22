@@ -7,16 +7,16 @@ use anyhow::Result;
 use ethers::prelude::*;
 use std::sync::Arc;
 
+pub mod aerodrome;
 pub mod v2;
 pub mod v3;
 pub mod v4;
-pub mod aerodrome;
 pub mod virtuals;
 
+pub use aerodrome::AerodromeV2Strategy;
 pub use v2::UniswapV2Strategy;
 pub use v3::UniswapV3Strategy;
 pub use v4::UniswapV4Strategy;
-pub use aerodrome::AerodromeV2Strategy;
 pub use virtuals::VirtualsStrategy;
 
 /// 定义模拟器的行为模式
@@ -76,6 +76,9 @@ pub trait DexStrategy: Send + Sync {
         0
     }
     fn pool_key(&self) -> Option<PoolKey> {
+        None
+    }
+    fn router(&self) -> Option<Address> {
         None
     }
 }

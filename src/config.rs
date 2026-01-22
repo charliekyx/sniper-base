@@ -8,6 +8,7 @@ pub struct AppConfig {
     pub private_key: String,
     pub sniper_enabled: bool,
     pub copy_trade_enabled: bool,
+    pub copy_sell_enabled: bool,
     pub shadow_mode: bool,
     pub target_wallets: Vec<String>,
 
@@ -70,6 +71,7 @@ impl AppConfig {
             sniper_enabled: get_bool("SNIPER_ENABLED"),
             copy_trade_enabled: get_bool("COPY_TRADE_ENABLED"),
             shadow_mode: get_bool("SHADOW_MODE"),
+            copy_sell_enabled: get_bool("COPY_SELL_ENABLED"),
             use_private_node: get_bool("USE_PRIVATE_NODE"),
 
             target_wallets: get_vec("TARGET_WALLETS"),

@@ -99,7 +99,7 @@ async fn main() -> anyhow::Result<()> {
         );
         for pos in existing_positions {
             // 恢复时也将 Token 加入锁，防止重复买入
-            lock_manager.lock(pos.token_address);
+            lock_manager.lock(pos.token_address, pos.leader_wallet.unwrap_or(Address::zero()));
             info!("Resuming monitor for {:?}", pos.token_address);
             let c = client.clone();
             let cfg = config.clone();

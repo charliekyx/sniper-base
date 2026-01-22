@@ -12,6 +12,8 @@ pub struct PositionData {
     pub initial_cost_eth: U256,
     pub timestamp: u64,
     pub fee: Option<u32>, // Fee Tier, 费率层级，Added for V3 support
+    #[serde(default)]
+    pub leader_wallet: Option<Address>, // 记录带单的钱包地址
 }
 
 pub fn init_storage() {

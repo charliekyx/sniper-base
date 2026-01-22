@@ -99,7 +99,7 @@ pub fn extract_pool_key_from_universal_router(input: &[u8]) -> Option<PoolKey> {
     None
 }
 
-pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
+pub fn decode_router_input(input: &[u8]) -> Option<(String, Address, U256)> {
     if input.len() < 4 {
         return None;
     }
@@ -121,6 +121,12 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         }
         Some(Address::from_slice(&input[offset + 12..offset + 32]))
     };
+    let read_uint = |offset: usize| -> Option<U256> {
+        if offset + 32 > input.len() {
+            return None;
+        }
+        Some(U256::from_big_endian(&input[offset..offset + 32]))
+    };
     let get_path_token = |arg_index: usize, get_last: bool| -> Option<Address> {
         let offset_ptr = 4 + arg_index * 32;
         let array_offset = read_usize(offset_ptr)?;
@@ -140,23 +146,23 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         } else {
             "Buy_Fee_ETH->Token"
         };
-        return get_path_token(1, true).map(|t| (action.to_string(), t));
+        return get_path_token(1, true).map(|t| (action.to_string(), t, read_uint(4).unwrap_or_default()));
     } else if sig == [0x18, 0xcb, 0xaf, 0xe5] || sig == [0x79, 0x1a, 0xc9, 0x47] {
         let action = if sig[0] == 0x18 {
             "Sell_Token->ETH"
         } else {
             "Sell_Fee_Token->ETH"
         };
-        return get_path_token(2, false).map(|t| (action.to_string(), t));
+        return get_path_token(2, false).map(|t| (action.to_string(), t, read_uint(4).unwrap_or_default()));
     }
     // [新增] Virtuals Protocol Support
     // buy(address token, uint256 amountIn, uint256 minAmountOut) -> 0xf69ac97a
     else if sig == [0xf6, 0x9a, 0xc9, 0x7a] {
-        return read_address(4).map(|t| ("Buy_Virtuals".to_string(), t));
+        return read_address(4).map(|t| ("Buy_Virtuals".to_string(), t, read_uint(36).unwrap_or_default()));
     }
     // sell(address token, uint256 amountIn, uint256 minAmountOut) -> 0x831e10eb
     else if sig == [0x83, 0x1e, 0x10, 0xeb] {
-        return read_address(4).map(|t| ("Sell_Virtuals".to_string(), t));
+        return read_address(4).map(|t| ("Sell_Virtuals".to_string(), t, read_uint(36).unwrap_or_default()));
     }
     // [新增] Aerodrome V2 Support (Solidly Fork)
     // swapExactETHForTokensSupportingFeeOnTransferTokens(uint256 amountOutMin, Route[] routes, address to, uint256 deadline)
@@ -179,7 +185,7 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         // 最后一个 Route 的起始位置
         let last_route_start = len_ptr + 32 + (routes_len - 1) * 128;
         // 'to' 是结构体的第 2 个字段 (offset 32)
-        return read_address(last_route_start + 32).map(|t| ("Buy_Aerodrome".to_string(), t));
+        return read_address(last_route_start + 32).map(|t| ("Buy_Aerodrome".to_string(), t, read_uint(4).unwrap_or_default()));
     }
     // swapExactTokensForETHSupportingFeeOnTransferTokens(uint256 amountIn, uint256 amountOutMin, Route[] routes, address to, uint256 deadline)
     // Selector: 0x45013492
@@ -189,14 +195,14 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let len_ptr = 4 + routes_offset;
         // 第一个 Route 的起始位置 = len_ptr + 32
         // 'from' 是结构体的第 1 个字段 (offset 0)
-        return read_address(len_ptr + 32).map(|t| ("Sell_Aerodrome".to_string(), t));
+        return read_address(len_ptr + 32).map(|t| ("Sell_Aerodrome".to_string(), t, read_uint(4).unwrap_or_default()));
     }
     // ... (Simplified for brevity, full logic from main.rs should be here if needed, but sticking to provided context logic)
     // Note: The original code had more branches (Odos, V3, Universal). I will include them to be safe.
     else if sig == [0x38, 0xed, 0x17, 0x39] || sig == [0x5c, 0x11, 0xd7, 0x95] {
-        return get_path_token(2, true).map(|t| ("Swap_Token->Token".to_string(), t));
+        return get_path_token(2, true).map(|t| ("Swap_Token->Token".to_string(), t, read_uint(4).unwrap_or_default()));
     } else if sig == [0xf3, 0x05, 0xd7, 0x19] {
-        return read_address(4).map(|t| ("AddLiquidity".to_string(), t));
+        return read_address(4).map(|t| ("AddLiquidity".to_string(), t, U256::zero()));
     } else if sig == [0xd1, 0xee, 0x21, 0x1d] || sig == [0x0f, 0x27, 0xc5, 0xc1] {
         let offset_ptr = 4;
         let path_offset = read_usize(offset_ptr)?;
@@ -213,18 +219,31 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         let token_in = Address::from_slice(&path_bytes[0..20]);
         let token_out = Address::from_slice(&path_bytes[path_len - 20..path_len]);
         if token_in == *WETH_BASE || token_in == Address::zero() {
-            return Some(("Buy_Odos".to_string(), token_out));
+            return Some(("Buy_Odos".to_string(), token_out, read_uint(36).unwrap_or_default()));
         } else {
             if token_out != *WETH_BASE && token_out != Address::zero() {
-                return Some(("Swap_Odos".to_string(), token_out));
+                return Some(("Swap_Odos".to_string(), token_out, read_uint(36).unwrap_or_default()));
             }
-            return Some(("Sell_Odos".to_string(), token_in));
+            return Some(("Sell_Odos".to_string(), token_in, read_uint(36).unwrap_or_default()));
         }
     } else if sig == [0x41, 0x4b, 0xf3, 0x89] || sig == [0x04, 0xe4, 0x5a, 0xaf] {
         // 0x414bf389: exactInputSingle (Old Router)
         // 0x04e45aaf: exactInputSingle (New SwapRouter02)
-        // 两个版本的 tokenOut 都在结构体的第二个位置 (offset 32)，可以直接复用
-        return read_address(36).map(|t| ("Buy_V3_Single".to_string(), t));
+        // tokenIn (offset 4), tokenOut (offset 36)
+        let token_in = read_address(4)?;
+        let token_out = read_address(36)?;
+        
+        // Extract amountIn based on router version
+        let amount_in = if sig == [0x41, 0x4b, 0xf3, 0x89] {
+            read_uint(164).unwrap_or_default() // Old: offset 160 + 4
+        } else {
+            read_uint(132).unwrap_or_default() // New: offset 128 + 4
+        };
+
+        if token_out == *WETH_BASE {
+            return Some(("Sell_V3_Single".to_string(), token_in, amount_in));
+        }
+        return Some(("Buy_V3_Single".to_string(), token_out, amount_in));
     } else if sig == [0xc0, 0x4b, 0x8d, 0x59] || sig == [0xb8, 0x58, 0x18, 0x3f] {
         // 0xc04b8d59: exactInput (Old Router)
         // 0xb858183f: exactInput (New SwapRouter02)
@@ -237,16 +256,26 @@ pub fn decode_router_input(input: &[u8]) -> Option<(String, Address)> {
         }
         let path_start = len_ptr + 32;
         let token_out_start = path_start + path_len - 20;
-        return Some((
-            "Buy_V3_Multi".to_string(),
-            Address::from_slice(&input[token_out_start..token_out_start + 20]),
-        ));
+        
+        let token_in = Address::from_slice(&input[path_start..path_start + 20]);
+        let token_out = Address::from_slice(&input[token_out_start..token_out_start + 20]);
+
+        // Extract amountIn based on router version
+        let amount_in = if sig == [0xc0, 0x4b, 0x8d, 0x59] {
+            read_uint(100).unwrap_or_default() // Old: offset 96 + 4
+        } else {
+            read_uint(68).unwrap_or_default() // New: offset 64 + 4
+        };
+
+        if token_out == *WETH_BASE {
+            return Some(("Sell_V3_Multi".to_string(), token_in, amount_in));
+        }
+        return Some(("Buy_V3_Multi".to_string(), token_out, amount_in));
     } else if sig == [0xac, 0x96, 0x50, 0xd8] {
         // Uniswap V3 Multicall(bytes[] data)
-        // 这是一个包装器，通常包含 swap。为了简单起见，我们标记它，具体的代币解析可能需要递归解码
-        return Some(("Multicall_V3".to_string(), Address::zero()));
+        return Some(("Multicall_V3".to_string(), Address::zero(), U256::zero()));
     } else if sig == [0xca, 0xe6, 0xa6, 0xb3] || sig == [0x35, 0x93, 0x56, 0x4c] {
-        return Some(("Universal_Interaction".to_string(), Address::zero()));
+        return Some(("Universal_Interaction".to_string(), Address::zero(), U256::zero()));
     }
     None
 }

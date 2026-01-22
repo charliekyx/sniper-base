@@ -1,4 +1,5 @@
 use crate::buy::execute_buy_and_approve;
+use crate::sell::execute_smart_sell;
 use crate::config::AppConfig;
 use crate::constants::{get_router_name, WETH_BASE, USDC_BASE, UNIV3_ROUTER, UNIV3_QUOTER};
 use crate::decoder::{decode_router_input, extract_pool_key_from_universal_router};
@@ -75,11 +76,11 @@ pub async fn process_transaction(
         //     }
         // }
 
-        let (mut action, mut token_addr) = if let Some((act, tok)) = decoded {
-            (act, tok)
+        let (mut action, mut token_addr, mut amount_in) = if let Some((act, tok, amt)) = decoded {
+            (act, tok, amt)
         } else if is_from_target {
             if let Ok(Some(token)) = simulator.scan_tx_for_token_in(tx.clone()).await {
-                ("Auto_Buy".to_string(), token)
+                ("Auto_Buy".to_string(), token, U256::zero())
             } else {
                 let selector = if tx.input.len() >= 4 {
                     ethers::utils::hex::encode(&tx.input[0..4])
@@ -124,9 +125,6 @@ pub async fn process_transaction(
                 return;
             }
 
-            if !lock_manager.try_lock(token_addr) {
-                return;
-            }
             let cleanup = |token| {
                 lock_manager.unlock(token);
             };
@@ -134,14 +132,108 @@ pub async fn process_transaction(
             let is_target_buy = config.copy_trade_enabled
                 && is_from_target
                 && (action.contains("Buy") || action.contains("Swap") || action == "Auto_Buy");
+            
+            // 检测目标是否在卖出
+            let is_target_sell = config.copy_sell_enabled
+                && is_from_target
+                && (action.contains("Sell") || action.contains("Burn"));
+
             let is_new_liquidity = config.sniper_enabled && action == "AddLiquidity";
 
-            if !is_target_buy && !is_new_liquidity {
-                cleanup(token_addr);
+            if !is_target_buy && !is_new_liquidity && !is_target_sell {
                 return;
             }
             if token_addr == *WETH_BASE {
                 cleanup(token_addr);
+                return;
+            }
+
+            // 跟单卖出逻辑
+            if is_target_sell {
+                // 只有当该代币绑定的 Leader 是当前交易发起者时，才卖出
+                if let Some(leader) = lock_manager.get_leader(token_addr) {
+                    if leader != tx.from {
+                        // 虽然我们持有这个币，但卖出的人不是我们跟的大哥，忽略
+                        return;
+                    }
+
+                    info!("[COPY SELL] Leader {:?} is selling {:?}. Calculating ratio...", tx.from, token_addr);
+                    
+                    // 简单的获取余额逻辑 (构建最小 ABI)
+                    let mut erc20_abi = ethers::abi::Abi::default();
+                    let balance_func = ethers::abi::Function {
+                        name: "balanceOf".to_string(),
+                        inputs: vec![ethers::abi::Param { name: "account".to_string(), kind: ethers::abi::ParamType::Address, internal_type: None }],
+                        outputs: vec![ethers::abi::Param { name: "balance".to_string(), kind: ethers::abi::ParamType::Uint(256), internal_type: None }],
+                        constant: Some(true),
+                        state_mutability: ethers::abi::StateMutability::View,
+                    };
+                    erc20_abi.functions.insert("balanceOf".to_string(), vec![balance_func]);
+                    let token_contract = Contract::new(token_addr, erc20_abi, client.clone());
+                    
+                    // 1. 获取当前的余额 (卖出后的余额)
+                    let leader_balance_after = token_contract.method::<_, U256>("balanceOf", leader).unwrap().call().await.unwrap_or(U256::zero());
+                    
+                    // 2. 计算卖出比例
+                    // 如果解析不到 amount_in (为0)，则默认全仓卖出 (ratio = 1.0)
+                    let ratio = if amount_in.is_zero() {
+                        1.0
+                    } else {
+                        let total_before = leader_balance_after + amount_in;
+                        if total_before.is_zero() {
+                            1.0
+                        } else {
+                            let sold_f = amount_in.as_u128() as f64;
+                            let total_f = total_before.as_u128() as f64;
+                            sold_f / total_f
+                        }
+                    };
+
+                    // 3. 获取我的余额
+                    if let Ok(my_balance) = token_contract.method::<_, U256>("balanceOf", client.address()).unwrap().call().await {
+                        if !my_balance.is_zero() {
+                            // 4. 计算我的卖出数量
+                            let my_sell_amount = if ratio >= 0.99 {
+                                my_balance // 如果卖出超过 99%，直接清仓
+                            } else {
+                                let my_bal_f = my_balance.as_u128() as f64;
+                                let sell_f = my_bal_f * ratio;
+                                U256::from(sell_f as u128)
+                            };
+
+                            if my_sell_amount.is_zero() { return; }
+
+                            info!("[COPY SELL] Ratio: {:.2}% | My Sell: {} / {}", ratio * 100.0, my_sell_amount, my_balance);
+
+                            // 执行卖出
+                            let _ = execute_smart_sell(
+                                client.clone(),
+                                Address::zero(), // 让函数内部去寻找最佳路由
+                                token_addr,
+                                my_sell_amount,
+                                &config,
+                                true, // 视为 Panic Sell，优先成交
+                                0,    // Fee 自动获取
+                                None, // Pool Key 自动获取
+                            ).await;
+                            
+                            let email_body = format!("Event: Copy Sell Executed\nTarget: {:?}\nToken: {:?}", tx.from, token_addr);
+                            crate::email::send_email_alert("Sniper: COPY SELL", &email_body);
+                        }
+                    }
+                    // 卖出后不需要解锁，monitor.rs 会检测到余额为 0 自动退出并解锁
+                    return;
+                } else {
+                    // 我们根本没持有这个币，忽略
+                    return;
+                }
+            }
+
+            // 确定 Leader: 如果是跟单，Leader 就是 tx.from；如果是狙击，Leader 为 0 地址
+            let leader = if is_target_buy { tx.from } else { Address::zero() };
+
+            // 买入逻辑 (只有未锁定的才买)
+            if !lock_manager.try_lock(token_addr, leader) {
                 return;
             }
 
@@ -150,7 +242,7 @@ pub async fn process_transaction(
             log_to_file(trigger_msg);
             let buy_amt = U256::from((config.buy_amount_eth * 1e18) as u64);
 
-            // [新增] 周限额检查：获取当前 ETH 对应的 USDC 价值
+            // 周限额检查：获取当前 ETH 对应的 USDC 价值
             let usdc_strategy = Arc::new(UniswapV3Strategy {
                 router: *UNIV3_ROUTER,
                 quoter: *UNIV3_QUOTER,
@@ -345,6 +437,7 @@ pub async fn process_transaction(
                         initial_cost_eth: buy_amt,
                         timestamp: Local::now().timestamp() as u64,
                         fee: Some(best_fee),
+                        leader_wallet: Some(leader),
                     };
                     let _ = save_position(&pos_data);
                     task::spawn(monitor_position(

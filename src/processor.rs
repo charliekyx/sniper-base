@@ -301,7 +301,7 @@ pub async fn process_transaction(
                 name: "PriceCheck".into(),
             });
             let usdc_val = match simulator
-                .simulate_bundle(client.address(), usdc_strategy, buy_amt, *USDC_BASE, 0)
+                .simulate_bundle(client.address(), usdc_strategy, buy_amt, *USDC_BASE, 50)
                 .await
             {
                 Ok((success, _, out, _, _, _)) if success => out.as_u128() as f64 / 1_000_000.0,

@@ -12,8 +12,8 @@ mod position_dao;
 mod processor;
 mod sell;
 mod simulation;
-mod strategies;
 mod spend_limit;
+mod strategies;
 
 use config::AppConfig;
 use diagnostics::run_self_check;
@@ -99,7 +99,10 @@ async fn main() -> anyhow::Result<()> {
         );
         for pos in existing_positions {
             // 恢复时也将 Token 加入锁，防止重复买入
-            lock_manager.lock(pos.token_address, pos.leader_wallet.unwrap_or(Address::zero()));
+            lock_manager.lock(
+                pos.token_address,
+                pos.leader_wallet.unwrap_or(Address::zero()),
+            );
             info!("Resuming monitor for {:?}", pos.token_address);
             let c = client.clone();
             let cfg = config.clone();
@@ -121,7 +124,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let start_nonce = provider_arc
-        .get_transaction_count(wallet.address(), None)
+        .get_transaction_count(
+            wallet.address(),
+            Some(BlockId::Number(BlockNumber::Pending)),
+        )
         .await?
         .as_u64();
     let nonce_manager = Arc::new(NonceManager::new(start_nonce));

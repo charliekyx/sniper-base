@@ -102,7 +102,13 @@ pub async fn execute_buy_and_approve(
         Err(e) => {
             error!("[ERROR] Buy Tx Failed immediately: {:?}", e);
             warn!("[RECOVERY] Attempting to resync Nonce from chain...");
-            if let Ok(real_nonce) = client.get_transaction_count(client.address(), None).await {
+            if let Ok(real_nonce) = client
+                .get_transaction_count(
+                    client.address(),
+                    Some(BlockId::Number(BlockNumber::Pending)),
+                )
+                .await
+            {
                 nonce_manager.reset(real_nonce.as_u64());
             }
             return Err(e.into());

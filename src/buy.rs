@@ -35,6 +35,15 @@ pub async fn execute_buy_and_approve(
     let nonce_approve = nonce_manager.get_and_increment();
 
     let gas_price = client.provider().get_gas_price().await.unwrap_or_default();
+    let max_base_fee = U256::from(config.max_base_fee_gwei) * U256::from(1_000_000_000);
+    if gas_price > max_base_fee {
+        warn!(
+            "SKIPPING BUY: Current base fee ({:.2} Gwei) > max configured base fee ({} Gwei)",
+            gas_price.as_u64() as f64 / 1_000_000_000.0,
+            config.max_base_fee_gwei
+        );
+        return Err(anyhow::anyhow!("Base fee too high"));
+    }
     let priority_fee = U256::from(config.max_priority_fee_gwei * 1_000_000_000);
     let total_gas_price = gas_price + priority_fee;
 

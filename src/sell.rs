@@ -34,7 +34,7 @@ pub async fn execute_smart_sell(
 
     let send_sell = |amt: U256, gas_mult: u64| {
         let client = client.clone();
-        let priority_fee = config.max_priority_fee_gwei;
+        let config = config.clone();
         let strategy = &strategy;
 
         async move {
@@ -43,7 +43,23 @@ pub async fn execute_smart_sell(
                 strategy.encode_sell(amt, token_in, client.address(), deadline, U256::zero())?;
 
             let base_fee = client.provider().get_gas_price().await?;
-            let prio_fee_val = U256::from(priority_fee * 1_000_000_000 * gas_mult);
+            if !is_panic {
+                let max_base_fee =
+                    U256::from(config.max_base_fee_gwei) * U256::from(1_000_000_000);
+                if base_fee > max_base_fee {
+                    warn!(
+                        "SKIPPING SELL: Current base fee ({:.2} Gwei) > max configured base fee ({} Gwei)",
+                        base_fee.as_u64() as f64 / 1_000_000_000.0,
+                        config.max_base_fee_gwei
+                    );
+                    return Err(anyhow::anyhow!("Base fee too high"));
+                }
+            } else {
+                info!("[SELL] Base fee check bypassed due to panic sell.");
+            }
+
+            let prio_fee_val =
+                U256::from(config.max_priority_fee_gwei * 1_000_000_000 * gas_mult);
             let max_fee = base_fee + prio_fee_val;
 
             let tx = Eip1559TransactionRequest::new()

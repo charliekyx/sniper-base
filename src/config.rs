@@ -19,6 +19,7 @@ pub struct AppConfig {
     pub buy_amount_eth: f64,
     pub gas_limit: u64,
     pub max_priority_fee_gwei: u64,
+    pub max_base_fee_gwei: u64,
 
     // Strategy
     pub sniper_block_delay: u64,
@@ -84,6 +85,7 @@ impl AppConfig {
             buy_amount_eth: get_f64("BUY_AMOUNT_ETH", 0.02),
             gas_limit: get_u64("GAS_LIMIT", 400000),
             max_priority_fee_gwei: get_u64("MAX_PRIORITY_FEE_GWEI", 3),
+            max_base_fee_gwei: get_u64("MAX_BASE_FEE_GWEI", 20),
 
             sniper_block_delay: get_u64("SNIPER_BLOCK_DELAY", 2),
             tp1_percent: get_u64("TP1_PERCENT", 30), // 默认 +30% 利润

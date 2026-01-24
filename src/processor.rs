@@ -254,9 +254,10 @@ pub async fn process_transaction(
                                 token_addr,
                                 my_sell_amount,
                                 &config,
-                                true, // 视为 Panic Sell，优先成交
-                                0,    // Fee 自动获取
-                                None, // Pool Key 自动获取
+                                U256::zero(), // Panic Sell, 无滑点保护
+                                true,         // 视为 Panic Sell，优先成交
+                                0,            // Fee 自动获取
+                                None,         // Pool Key 自动获取
                             )
                             .await;
 

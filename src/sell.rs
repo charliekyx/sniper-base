@@ -14,6 +14,7 @@ pub async fn execute_smart_sell(
     token_in: Address,
     amount_token: U256,
     config: &AppConfig,
+    amount_out_min: U256, // [修改] 新增滑点保护参数
     is_panic: bool,
     fee: u32,
     v4_pool_key: Option<PoolKey>,
@@ -38,14 +39,28 @@ pub async fn execute_smart_sell(
         let strategy = &strategy;
 
         async move {
+            // 根据实际卖出数量，按比例缩放滑点保护值
+            let scaled_min_out = if amount_token.is_zero() {
+                U256::zero()
+            } else {
+                amount_out_min
+                    .saturating_mul(amt)
+                    .checked_div(amount_token)
+                    .unwrap_or_default()
+            };
+
             // 2. 直接调用策略的编码方法
-            let (target_router, calldata, _) =
-                strategy.encode_sell(amt, token_in, client.address(), deadline, U256::zero())?;
+            let (target_router, calldata, _) = strategy.encode_sell(
+                amt,
+                token_in,
+                client.address(),
+                deadline,
+                scaled_min_out, // [修改] 使用计算后的滑点
+            )?;
 
             let base_fee = client.provider().get_gas_price().await?;
             if !is_panic {
-                let max_base_fee =
-                    U256::from(config.max_base_fee_gwei) * U256::from(1_000_000_000);
+                let max_base_fee = U256::from(config.max_base_fee_gwei) * U256::from(1_000_000_000);
                 if base_fee > max_base_fee {
                     warn!(
                         "SKIPPING SELL: Current base fee ({:.2} Gwei) > max configured base fee ({} Gwei)",
@@ -58,8 +73,7 @@ pub async fn execute_smart_sell(
                 info!("[SELL] Base fee check bypassed due to panic sell.");
             }
 
-            let prio_fee_val =
-                U256::from(config.max_priority_fee_gwei * 1_000_000_000 * gas_mult);
+            let prio_fee_val = U256::from(config.max_priority_fee_gwei * 1_000_000_000 * gas_mult);
             let max_fee = base_fee + prio_fee_val;
 
             let tx = Eip1559TransactionRequest::new()

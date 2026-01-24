@@ -89,7 +89,7 @@ pub async fn monitor_position(
             break;
         }
 
-        // [新增] 动态成本调整逻辑：配合 Copy Sell 和 分批止盈
+        // 动态成本调整逻辑：配合 Copy Sell 和 分批止盈
         // 如果检测到余额减少（说明发生了卖出），则按比例下调初始成本和最高价记录
         if !last_balance.is_zero() && balance < last_balance {
             let ratio_num = balance;
@@ -220,13 +220,37 @@ pub async fn monitor_position(
                     break;
                 }
             } else {
+                // 增加滑点保护逻辑
+                let min_amount_out = if is_panic || balance.is_zero() {
+                    U256::zero() // 恐慌卖出时，不计滑点，保证成交
+                } else {
+                    // 计算本次卖出部分对应的价值
+                    let value_of_sell_portion = current_val
+                        .saturating_mul(sell_amount)
+                        .checked_div(balance)
+                        .unwrap_or_default();
+                    // 应用滑点
+                    value_of_sell_portion
+                        .saturating_mul(U256::from(100 - config.slippage_pct))
+                        .checked_div(U256::from(100))
+                        .unwrap_or_default()
+                };
+
+                if !is_panic && min_amount_out > U256::zero() {
+                    info!(
+                        "[SELL] Slippage Protection Activated. Min ETH to receive: {}",
+                        format_ether(min_amount_out)
+                    );
+                }
+
                 let _ = execute_smart_sell(
                     client.clone(),
-                    Some(strategy.clone()), // 传入当前策略，不再传空 Router
-                    Address::zero(),        // Router 地址在此处被忽略，使用 0 地址占位
+                    Some(strategy.clone()), // 传入当前策略
+                    Address::zero(),        // Router 地址在此处被忽略
                     token_addr,
                     sell_amount,
                     &config,
+                    min_amount_out, // [修改] 传入计算好的滑点保护值
                     is_panic,
                     strategy.fee(),
                     strategy.pool_key(),
@@ -236,7 +260,7 @@ pub async fn monitor_position(
                 // 只有在清仓或恐慌卖出时才释放锁，防止分批止盈时重复买入
                 if sell_amount >= balance || is_panic {
                     lock_manager.unlock(token_addr);
-                    break; // [修复] 全仓卖出后必须退出循环，防止重复卖出
+                    break; // 全仓卖出后必须退出循环，防止重复卖出
                 }
 
                 let email_body = format!(

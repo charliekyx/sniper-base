@@ -143,7 +143,7 @@ pub async fn process_transaction(
             if !is_target_buy && !is_new_liquidity && !is_target_sell {
                 return;
             }
-            if token_addr == *WETH_BASE {
+            if token_addr == *WETH_BASE || token_addr == *USDC_BASE {
                 cleanup(token_addr);
                 return;
             }

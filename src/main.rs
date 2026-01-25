@@ -16,7 +16,7 @@ mod spend_limit;
 mod strategies;
 
 use config::AppConfig;
-use diagnostics::run_self_check;
+use diagnostics::{force_clear_stuck_txs, run_self_check};
 use lock_manager::LockManager;
 use monitor::monitor_position;
 use nonce::NonceManager;
@@ -84,6 +84,9 @@ async fn main() -> anyhow::Result<()> {
             "PUBLIC"
         }
     );
+
+    // [新增] 启动时自动清理卡住的交易 (无需充值，使用剩余 Gas 取消)
+    force_clear_stuck_txs(client.clone()).await;
 
     // 在主循环开始前运行自检
     run_self_check(provider_arc.clone(), simulator.clone(), client.address()).await;

@@ -11,6 +11,46 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 
+pub async fn force_clear_stuck_txs(client: Arc<SignerMiddleware<Provider<Ipc>, LocalWallet>>) {
+    let addr = client.address();
+    let nonce_latest = client
+        .get_transaction_count(addr, Some(BlockId::Number(BlockNumber::Latest)))
+        .await
+        .unwrap_or_default();
+    let nonce_pending = client
+        .get_transaction_count(addr, Some(BlockId::Number(BlockNumber::Pending)))
+        .await
+        .unwrap_or_default();
+
+    if nonce_pending > nonce_latest {
+        info!(
+            "[CLEAR] Found stuck transactions. Latest Nonce: {}, Pending Nonce: {}. Clearing...",
+            nonce_latest, nonce_pending
+        );
+
+        let gas_price = client.provider().get_gas_price().await.unwrap_or_default();
+        // 提高 20% Gas Price 以确保覆盖旧交易
+        let new_gas_price = gas_price * 120 / 100;
+
+        for nonce in nonce_latest.as_u64()..nonce_pending.as_u64() {
+            info!("[CLEAR] Cancelling Stuck Nonce {}...", nonce);
+            let tx = Eip1559TransactionRequest::new()
+                .to(addr) // 发给自己
+                .value(0) // 0 ETH
+                .nonce(nonce)
+                .max_fee_per_gas(new_gas_price)
+                .max_priority_fee_per_gas(new_gas_price);
+
+            match client.send_transaction(tx, None).await {
+                Ok(p) => info!("[CLEAR] Replacement sent: {:?}", p.tx_hash()),
+                Err(e) => error!("[CLEAR] Failed to cancel nonce {}: {:?}", nonce, e),
+            }
+        }
+        // 等待几秒让节点同步
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+}
+
 pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, owner: Address) {
     info!("[SELF-CHECK] Running startup diagnostics...");
 
@@ -62,10 +102,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
         match sim_res {
             Ok((success, _, out, reason, _, _)) => {
                 if success {
-                    info!(
-                        "[PASS] Simulation Engine is working. Output: {} AERO",
-                        out
-                    );
+                    info!("[PASS] Simulation Engine is working. Output: {} AERO", out);
                 } else {
                     error!("[FAIL] Simulation returned false. Reason: {}", reason);
                 }
@@ -195,10 +232,7 @@ pub async fn run_self_check(provider: Arc<Provider<Ipc>>, simulator: Simulator, 
                         out, fee
                     );
                 } else {
-                    error!(
-                        "[FAIL] Aerodrome V3 Simulation failed. Reason: {}",
-                        reason
-                    );
+                    error!("[FAIL] Aerodrome V3 Simulation failed. Reason: {}", reason);
                 }
             }
             Err(e) => error!("[FAIL] Aerodrome V3 Simulation crashed: {:?}", e),

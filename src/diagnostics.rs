@@ -29,8 +29,13 @@ pub async fn force_clear_stuck_txs(client: Arc<SignerMiddleware<Provider<Ipc>, L
         );
 
         let gas_price = client.provider().get_gas_price().await.unwrap_or_default();
-        // 提高 20% Gas Price 以确保覆盖旧交易
-        let new_gas_price = gas_price * 120 / 100;
+        // 提高 300% (3x) Gas Price 以确保覆盖旧交易
+        // 并且设置一个底限 (Min 25 Gwei)，防止当前网络 Gas 过低导致无法覆盖之前的狙击单
+        let min_clear_gas = U256::from(25_000_000_000u64); // 25 Gwei
+        let mut new_gas_price = gas_price * 3;
+        if new_gas_price < min_clear_gas {
+            new_gas_price = min_clear_gas;
+        }
 
         for nonce in nonce_latest.as_u64()..nonce_pending.as_u64() {
             info!("[CLEAR] Cancelling Stuck Nonce {}...", nonce);

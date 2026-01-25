@@ -45,7 +45,8 @@ pub async fn execute_buy_and_approve(
         return Err(anyhow::anyhow!("Base fee too high"));
     }
     let priority_fee = U256::from(config.max_priority_fee_gwei * 1_000_000_000);
-    let total_gas_price = gas_price + priority_fee;
+    let buffer_base_fee = gas_price * 125 / 100;
+    let total_gas_price = buffer_base_fee + priority_fee;
 
     let buy_tx = Eip1559TransactionRequest::new()
         .to(router_addr)
@@ -116,7 +117,7 @@ pub async fn execute_buy_and_approve(
     };
     let _ = client.send_transaction(approve_tx, None).await;
     info!("[BUNDLE] Buy Sent: {:?}", pending_buy.tx_hash());
-    match timeout(Duration::from_secs(30), pending_buy).await {
+    match timeout(Duration::from_secs(60), pending_buy).await {
         Ok(receipt_res) => {
             let receipt = receipt_res?;
             if receipt.is_some() && receipt.unwrap().status == Some(U64::from(1)) {
